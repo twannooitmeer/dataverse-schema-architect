@@ -26,7 +26,16 @@ param(
     [Parameter(Mandatory)] [string] $EnvironmentUrl
 )
 
-Set-StrictMode -Version Latest
+# Deliberately NOT Set-StrictMode here (unlike Dataverse.psm1, which keeps it
+# for its own internal code discipline). This script's whole job is reading a
+# partially-optional external JSON spec - most column/lookup properties
+# (required, maxLength, format, minValue...) are legitimately absent on many
+# entries, and under strict mode ANY read of a property a given object simply
+# doesn't have throws "cannot be found on this object", not just genuine
+# typos. Hit this for real on the very first live run: a column with no
+# "required" key in the spec (correctly meaning "not required") crashed the
+# whole deploy after two tables had already been created. Strict mode was
+# fighting the exact shape of data this script needs to accept.
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Dataverse.psm1') -Force

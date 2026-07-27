@@ -253,6 +253,26 @@ function Test-DataverseGlobalChoice {
     return $null -ne $result
 }
 
+function Get-DataverseGlobalChoiceId {
+    <#
+    .SYNOPSIS
+        Resolves a global choice's MetadataId from its name.
+    .DESCRIPTION
+        Used instead of binding a new Picklist attribute's GlobalOptionSet
+        navigation property via the Name-based alternate-key form
+        (GlobalOptionSetDefinitions(Name='...')) in an @odata.bind annotation.
+        Microsoft's own Web API docs list that form as valid, but it failed
+        outright against a real environment with "Guid should contain 32
+        digits with 4 dashes" - whatever the exact cause, resolving the real
+        MetadataId first and binding to that (the form the same docs present
+        as primary) sidesteps the ambiguity entirely rather than trusting an
+        alternate-key path that didn't work in practice.
+    #>
+    param([Parameter(Mandatory)] [string] $Name)
+    $result = Invoke-DataverseApi -Method Get -Path "GlobalOptionSetDefinitions(Name='$Name')?`$select=MetadataId"
+    return $result.MetadataId
+}
+
 function New-DataverseGlobalChoice {
     <#
     .SYNOPSIS
@@ -448,9 +468,10 @@ function Add-DataverseColumn {
             if (-not $GlobalChoiceName) {
                 throw "Add-DataverseColumn -Type Choice requires -GlobalChoiceName. This module has no local-picklist path by design."
             }
+            $globalChoiceId = Get-DataverseGlobalChoiceId -Name $GlobalChoiceName
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.PicklistAttributeMetadata'; SchemaName = $SchemaName
                DisplayName = $displayLabel
-               'GlobalOptionSet@odata.bind' = "/GlobalOptionSetDefinitions(Name='$GlobalChoiceName')" }
+               'GlobalOptionSet@odata.bind' = "/GlobalOptionSetDefinitions($globalChoiceId)" }
         }
     }
 
