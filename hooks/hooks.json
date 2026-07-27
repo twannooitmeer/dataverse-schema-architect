@@ -1,0 +1,22 @@
+{
+  "_comment": "PostToolUse checks on Write/Edit/MultiEdit, scanning newly-written PowerShell content for the two costliest mistakes hit building the reference implementation this plugin generalizes from: components created without explicit solution targeting, and hand-built cascade configuration objects that can silently become parental-equivalent. Neither hook can (or needs to) guard calls that already go through Dataverse.psm1's own functions, which enforce both rules at the PowerShell language level (mandatory parameters, ValidateSet) - these hooks catch new code that bypasses those safe wrappers.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const path=require('node:path'); const root=process.env.PLUGIN_ROOT||process.env.CLAUDE_PLUGIN_ROOT; if(!root){console.error('PLUGIN_ROOT is not set'); process.exit(0);} require(path.resolve(root,'hooks','validate-solution-targeting.js'));\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node -e \"const path=require('node:path'); const root=process.env.PLUGIN_ROOT||process.env.CLAUDE_PLUGIN_ROOT; if(!root){console.error('PLUGIN_ROOT is not set'); process.exit(0);} require(path.resolve(root,'hooks','validate-cascade-config.js'));\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+# Anything a design run might produce locally - never commit a real spec
+# that could contain environment-specific naming from someone's actual tenant.
+dataverse-schema.json
+*.local.json
+
+# Editors / OS
+.vs/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

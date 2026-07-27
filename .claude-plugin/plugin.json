@@ -1,0 +1,20 @@
+{
+  "name": "dataverse-schema-architect",
+  "version": "0.1.0",
+  "description": "Design and deploy Dataverse tables, global choices, relationships, alternate keys, views and security roles with safety defaults an environment's default solution and picklist habits won't quietly undermine.",
+  "author": {
+    "name": "Twan Nooitmeer"
+  },
+  "homepage": "https://github.com/twannooitmeer/dataverse-schema-architect",
+  "repository": "https://github.com/twannooitmeer/dataverse-schema-architect",
+  "license": "MIT",
+  "keywords": [
+    "power-platform",
+    "dataverse",
+    "data-model",
+    "power-apps",
+    "solution",
+    "security-roles",
+    "schema"
+  ]
+}
