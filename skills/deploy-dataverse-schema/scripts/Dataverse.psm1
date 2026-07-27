@@ -166,7 +166,7 @@ function Invoke-DataverseApi {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [ValidateSet('Get', 'Post', 'Patch', 'Delete')] [string] $Method,
+        [Parameter(Mandatory)] [ValidateSet('Get', 'Post', 'Patch', 'Put', 'Delete')] [string] $Method,
         [Parameter(Mandatory)] [string] $Path,
         $Body,
         [string] $SolutionUniqueName,
@@ -219,8 +219,27 @@ function Invoke-DataverseApi {
 }
 
 function Test-DataverseNotFound {
+    <#
+    .SYNOPSIS
+        True when a collection-query response (savedqueries, roles,
+        fieldsecurityprofiles, fieldpermissions - anything checked via
+        $filter=... rather than a by-key metadata GET) matched nothing.
+    .DESCRIPTION
+        A "no rows match" $filter query returns HTTP 200 with an empty
+        value array, not a 404 - so this cannot just check $null (that
+        pattern is Test-DataverseTable/Column/Relationship's job, which
+        query by key and genuinely 404 instead). The bug this fixes: an
+        empty PowerShell array is falsy, so "$Response.value -and
+        $Response.value.Count -eq 0" short-circuited on the array itself
+        before ever reaching -eq 0, making every zero-match response
+        register as "found". That silently no-op'd every view, security
+        role and field permission this module ever tried to create -
+        caught only by independently re-querying after a "skip" and
+        finding nothing there.
+    #>
     param($Response)
-    return $null -eq $Response -or ($Response.value -and $Response.value.Count -eq 0)
+    if ($null -eq $Response -or $null -eq $Response.value) { return $true }
+    return $Response.value.Count -eq 0
 }
 
 # --- Cascade presets ------------------------------------------------------------
@@ -711,8 +730,19 @@ function Set-DataverseFieldSecured {
         rejects field permission creation on an unsecured column outright.
     .PARAMETER AttributeType
         The concrete attribute metadata type name (e.g. "MoneyAttributeMetadata"),
-        needed to address the typed PATCH endpoint the Web API requires for
-        attribute metadata updates.
+        needed to address the typed endpoint the Web API requires for attribute
+        metadata updates.
+    .DESCRIPTION
+        Attribute (and entity) metadata updates are one of the few Web API
+        surfaces that reject PATCH outright - Microsoft's own docs are
+        explicit that "You can't use the PATCH method to update data model
+        entities... you must use the PUT method... and be careful to include
+        all the existing properties that you don't intend to change." Found
+        live: a partial PATCH with just {IsSecured: true} came back 405
+        "resource does not support http method 'PATCH'". Fixed by retrieving
+        the full typed attribute definition first, changing only IsSecured on
+        it, and PUTting the whole thing back - the pattern Microsoft's own
+        Web API sample uses for every attribute metadata update.
     #>
     [CmdletBinding()]
     param(
@@ -722,15 +752,16 @@ function Set-DataverseFieldSecured {
         [Parameter(Mandatory)] [string] $SolutionUniqueName
     )
 
-    $current = Invoke-DataverseApi -Method Get `
-        -Path "EntityDefinitions(LogicalName='$EntityLogicalName')/Attributes(LogicalName='$AttributeLogicalName')?`$select=IsSecured"
+    $path = "EntityDefinitions(LogicalName='$EntityLogicalName')/Attributes(LogicalName='$AttributeLogicalName')/Microsoft.Dynamics.CRM.$AttributeType"
+
+    $current = Invoke-DataverseApi -Method Get -Path $path
     if ($current.IsSecured -eq $true) {
         Write-Host "  skip   $EntityLogicalName.$AttributeLogicalName already secured"
         return
     }
 
-    $path = "EntityDefinitions(LogicalName='$EntityLogicalName')/Attributes(LogicalName='$AttributeLogicalName')/Microsoft.Dynamics.CRM.$AttributeType"
-    Invoke-DataverseApi -Method Patch -Path $path -Body @{ IsSecured = $true } -SolutionUniqueName $SolutionUniqueName | Out-Null
+    $current.IsSecured = $true
+    Invoke-DataverseApi -Method Put -Path $path -Body $current -SolutionUniqueName $SolutionUniqueName | Out-Null
     Write-Host "  create secured $EntityLogicalName.$AttributeLogicalName"
 }
 
