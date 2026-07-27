@@ -1,0 +1,16 @@
+{
+    "name": "dataverse-schema-architect",
+    "owner": {
+        "name": "Twan Nooitmeer"
+    },
+    "metadata": {
+        "description": "Design and deploy Dataverse tables, global choices, relationships, alternate keys, views and security roles with production-grade safety defaults",
+        "pluginRoot": "."
+    },
+    "plugins": [
+        {
+            "name": "dataverse-schema-architect",
+            "source": "./"
+        }
+    ]
+}
