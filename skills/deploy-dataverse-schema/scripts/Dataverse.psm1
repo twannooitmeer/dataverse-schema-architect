@@ -338,6 +338,7 @@ function New-DataverseTable {
         [Parameter(Mandatory)] [string] $PrimaryAttributeSchemaName,
         [Parameter(Mandatory)] [string] $PrimaryAttributeDisplayName,
         [int] $PrimaryAttributeMaxLength = 300,
+        [string] $PrimaryAttributeAutoNumberFormat,
         [Parameter(Mandatory)] [string] $SolutionUniqueName,
         [int] $LanguageCode = 1033
     )
@@ -349,6 +350,22 @@ function New-DataverseTable {
 
     $label = { param($t) @{ LocalizedLabels = @(@{ Label = $t; LanguageCode = $LanguageCode }) } }
 
+    $primaryAttribute = @{
+        '@odata.type'  = 'Microsoft.Dynamics.CRM.StringAttributeMetadata'
+        SchemaName     = $PrimaryAttributeSchemaName
+        DisplayName    = (& $label $PrimaryAttributeDisplayName)
+        RequiredLevel  = @{ Value = 'ApplicationRequired' }
+        MaxLength      = $PrimaryAttributeMaxLength
+        IsPrimaryName  = $true
+    }
+    if ($PrimaryAttributeAutoNumberFormat) {
+        # Primary name column can be autonumbered directly - e.g. a quote or
+        # project number like QUO-00001. Requires ApplicationRequired here
+        # regardless, since Dataverse still needs a RequiredLevel on the
+        # primary name even though the value gets generated automatically.
+        $primaryAttribute.AutoNumberFormat = $PrimaryAttributeAutoNumberFormat
+    }
+
     $body = @{
         '@odata.type'          = 'Microsoft.Dynamics.CRM.EntityMetadata'
         SchemaName             = $LogicalName
@@ -358,14 +375,7 @@ function New-DataverseTable {
         OwnershipType          = $Ownership
         HasActivities          = $false
         HasNotes               = $false
-        Attributes             = @(@{
-            '@odata.type'  = 'Microsoft.Dynamics.CRM.StringAttributeMetadata'
-            SchemaName     = $PrimaryAttributeSchemaName
-            DisplayName    = (& $label $PrimaryAttributeDisplayName)
-            RequiredLevel  = @{ Value = 'ApplicationRequired' }
-            MaxLength      = $PrimaryAttributeMaxLength
-            IsPrimaryName  = $true
-        })
+        Attributes             = @($primaryAttribute)
     }
 
     Invoke-DataverseApi -Method Post -Path 'EntityDefinitions' -Body $body -SolutionUniqueName $SolutionUniqueName | Out-Null
@@ -388,19 +398,33 @@ function Add-DataverseColumn {
         Generic column creation, idempotent, dispatching to the right
         Dataverse attribute metadata shape by -Type.
     .PARAMETER Type
-        One of: String, Memo, Integer, Decimal, Money, DateOnly, Image, File,
-        Boolean, Choice. Choice REQUIRES -GlobalChoiceName - there is no
-        local-picklist option in this module.
+        One of: String, Memo, Integer, Decimal, Money, DateOnly, DateTime,
+        Image, File, Boolean, Choice. Choice REQUIRES -GlobalChoiceName -
+        there is no local-picklist option in this module. DateOnly is for
+        calendar facts (Time Zone Independent - the project-wide convention
+        for anything that isn't a real moment in time); DateTime is for
+        genuine moments - when something actually happened - and uses
+        UserLocal behavior. Getting these two swapped is exactly the mistake
+        the convention exists to prevent: a DateOnly column used for a
+        "last synced at" timestamp would silently shift by time zone.
+    .PARAMETER AutoNumberFormat
+        Only meaningful with -Type String. A Dataverse autonumber format
+        string, e.g. "QUO-{SEQNUM:5}" -> QUO-00001. See Microsoft's
+        AutoNumberFormat placeholder reference (SEQNUM, RANDSTRING,
+        DATETIMEUTC) - this module passes the string through as-is and does
+        not validate its placeholder syntax, since Dataverse itself only
+        validates it lazily on first save, not at column-creation time.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $EntityLogicalName,
         [Parameter(Mandatory)] [string] $SchemaName,
         [Parameter(Mandatory)] [string] $DisplayName,
-        [Parameter(Mandatory)] [ValidateSet('String', 'Memo', 'Integer', 'Decimal', 'Money', 'DateOnly', 'Image', 'File', 'Boolean', 'Choice')]
+        [Parameter(Mandatory)] [ValidateSet('String', 'Memo', 'Integer', 'Decimal', 'Money', 'DateOnly', 'DateTime', 'Image', 'File', 'Boolean', 'Choice')]
         [string] $Type,
         [int] $MaxLength = 100,
         [ValidateSet('Text', 'Email', 'Url', 'TextArea')] [string] $StringFormat = 'Text',
+        [string] $AutoNumberFormat,
         [int] $MinValue,
         [int] $MaxValue,
         [int] $Precision = 2,
@@ -425,8 +449,19 @@ function Add-DataverseColumn {
 
     $body = switch ($Type) {
         'String' {
-            @{ '@odata.type' = 'Microsoft.Dynamics.CRM.StringAttributeMetadata'; SchemaName = $SchemaName
+            $stringBody = @{ '@odata.type' = 'Microsoft.Dynamics.CRM.StringAttributeMetadata'; SchemaName = $SchemaName
                DisplayName = $displayLabel; MaxLength = $MaxLength; Format = $StringFormat; RequiredLevel = $requiredLevel }
+            if ($AutoNumberFormat) {
+                # Per Microsoft's own docs: Format/FormatName must be Text for
+                # an autonumber column - fail loudly here rather than let
+                # Dataverse reject a StringFormat/AutoNumberFormat combination
+                # that can never work, with a less obvious error message.
+                if ($StringFormat -ne 'Text') {
+                    throw "Add-DataverseColumn: -AutoNumberFormat requires -StringFormat Text (got '$StringFormat'). Dataverse does not support autonumber on Email/Url/TextArea columns."
+                }
+                $stringBody.AutoNumberFormat = $AutoNumberFormat
+            }
+            $stringBody
         }
         'Memo' {
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.MemoAttributeMetadata'; SchemaName = $SchemaName
@@ -447,6 +482,10 @@ function Add-DataverseColumn {
         'DateOnly' {
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.DateTimeAttributeMetadata'; SchemaName = $SchemaName
                DisplayName = $displayLabel; Format = 'DateOnly'; DateTimeBehavior = @{ Value = 'DateOnly' }; RequiredLevel = $requiredLevel }
+        }
+        'DateTime' {
+            @{ '@odata.type' = 'Microsoft.Dynamics.CRM.DateTimeAttributeMetadata'; SchemaName = $SchemaName
+               DisplayName = $displayLabel; Format = 'DateAndTime'; DateTimeBehavior = @{ Value = 'UserLocal' }; RequiredLevel = $requiredLevel }
         }
         'Image' {
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.ImageAttributeMetadata'; SchemaName = $SchemaName; DisplayName = $displayLabel }

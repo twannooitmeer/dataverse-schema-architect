@@ -53,7 +53,7 @@ if (-not $spec.solutionUniqueName) {
 }
 
 $validOwnership = @('UserOwned', 'OrganizationOwned')
-$validColumnTypes = @('String', 'Memo', 'Integer', 'Decimal', 'Money', 'DateOnly', 'Image', 'File', 'Boolean', 'Choice')
+$validColumnTypes = @('String', 'Memo', 'Integer', 'Decimal', 'Money', 'DateOnly', 'DateTime', 'Image', 'File', 'Boolean', 'Choice')
 $validCascades = @('Referential', 'ReferentialRestrictDelete', 'Parental')
 
 foreach ($table in $spec.tables) {
@@ -97,13 +97,22 @@ foreach ($table in $spec.tables) {
     $primaryMaxLength = 300
     if ($table.primaryAttribute.maxLength) { $primaryMaxLength = $table.primaryAttribute.maxLength }
 
-    New-DataverseTable -LogicalName $table.logicalName -DisplayName $table.displayName `
-        -PluralDisplayName $table.pluralDisplayName -Description $table.description `
-        -Ownership $table.ownership `
-        -PrimaryAttributeSchemaName $table.primaryAttribute.schemaName `
-        -PrimaryAttributeDisplayName $table.primaryAttribute.displayName `
-        -PrimaryAttributeMaxLength $primaryMaxLength `
-        -SolutionUniqueName $spec.solutionUniqueName
+    $tableParams = @{
+        LogicalName                 = $table.logicalName
+        DisplayName                 = $table.displayName
+        PluralDisplayName            = $table.pluralDisplayName
+        Description                  = $table.description
+        Ownership                    = $table.ownership
+        PrimaryAttributeSchemaName   = $table.primaryAttribute.schemaName
+        PrimaryAttributeDisplayName  = $table.primaryAttribute.displayName
+        PrimaryAttributeMaxLength    = $primaryMaxLength
+        SolutionUniqueName           = $spec.solutionUniqueName
+    }
+    if ($table.primaryAttribute.autoNumberFormat) {
+        $tableParams.PrimaryAttributeAutoNumberFormat = $table.primaryAttribute.autoNumberFormat
+    }
+
+    New-DataverseTable @tableParams
 }
 
 # --- 3. Columns -------------------------------------------------------------------
@@ -122,6 +131,7 @@ foreach ($table in $spec.tables) {
         }
         if ($column.maxLength) { $params.MaxLength = $column.maxLength }
         if ($column.format) { $params.StringFormat = $column.format }
+        if ($column.autoNumberFormat) { $params.AutoNumberFormat = $column.autoNumberFormat }
         if ($null -ne $column.minValue) { $params.MinValue = $column.minValue }
         if ($null -ne $column.maxValue) { $params.MaxValue = $column.maxValue }
         if ($column.precision) { $params.Precision = $column.precision }
