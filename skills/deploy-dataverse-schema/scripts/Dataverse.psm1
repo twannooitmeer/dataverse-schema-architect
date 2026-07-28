@@ -776,11 +776,23 @@ function Get-DataverseOptionalArray {
         Same reasoning as Get-DataverseOptionalValue, for a property that's
         meant to be enumerated - always returns an array (empty if the
         property is absent or null), never throws, never returns $null.
+    .DESCRIPTION
+        The leading comma on both return statements is load-bearing, not
+        stylistic: a bare `return @($value)` looks like it forces array
+        output, but PowerShell's pipeline still enumerates a single-element
+        array on return and hands the caller back the bare scalar element,
+        not a 1-element array - `$fieldNames.Count` then throws exactly the
+        same "property cannot be found" error this whole helper exists to
+        prevent, but only for a JSON array with exactly one item (two or
+        more items survive `@($value)` untouched, which is what let this
+        hide until a real one-item `mainForm.fields` list hit it). The unary
+        comma operator wraps the array itself as a single pipeline object,
+        which is what actually stops PowerShell from unwrapping it.
     #>
     param($Object, [string] $Name)
     $value = Get-DataverseOptionalValue -Object $Object -Name $Name
-    if ($null -eq $value) { return @() }
-    return @($value)
+    if ($null -eq $value) { return , @() }
+    return , @($value)
 }
 
 # --- Cascade presets ------------------------------------------------------------
@@ -1155,6 +1167,15 @@ function Add-DataverseColumn {
         DATETIMEUTC) - this module passes the string through as-is and does
         not validate its placeholder syntax, since Dataverse itself only
         validates it lazily on first save, not at column-creation time.
+    .PARAMETER MaxLength
+        Only meaningful with -Type String or -Type Memo. Left unset (or 0),
+        the effective default is type-aware: 100 for String, 2000 for Memo -
+        matching Dataverse's own maker-portal defaults for each. A single
+        shared numeric default here would silently undersize every Memo
+        column a spec doesn't override explicitly - hit for real seeding
+        disclaimer/description text that Dataverse's own UI would have
+        defaulted to 2000 characters, truncated to 100 instead. Pass this
+        explicitly to override either default.
     #>
     [CmdletBinding()]
     param(
@@ -1163,7 +1184,7 @@ function Add-DataverseColumn {
         [Parameter(Mandatory)] [string] $DisplayName,
         [Parameter(Mandatory)] [ValidateSet('String', 'Memo', 'Integer', 'Decimal', 'Money', 'DateOnly', 'DateTime', 'Image', 'File', 'Boolean', 'Choice')]
         [string] $Type,
-        [int] $MaxLength = 100,
+        [int] $MaxLength,
         [ValidateSet('Text', 'Email', 'Url', 'TextArea')] [string] $StringFormat = 'Text',
         [string] $AutoNumberFormat,
         [int] $MinValue,
@@ -1189,11 +1210,14 @@ function Add-DataverseColumn {
 
     $displayLabel = @{ LocalizedLabels = @(@{ Label = $DisplayName; LanguageCode = $LanguageCode }) }
     $requiredLevel = @{ Value = if ($Required) { 'ApplicationRequired' } else { 'None' } }
+    # Type-aware default - see the -MaxLength parameter help for why a single
+    # shared default across String and Memo is wrong.
+    $effectiveMaxLength = if ($MaxLength -gt 0) { $MaxLength } elseif ($Type -eq 'Memo') { 2000 } else { 100 }
 
     $body = switch ($Type) {
         'String' {
             $stringBody = @{ '@odata.type' = 'Microsoft.Dynamics.CRM.StringAttributeMetadata'; SchemaName = $SchemaName
-               DisplayName = $displayLabel; MaxLength = $MaxLength; Format = $StringFormat; RequiredLevel = $requiredLevel }
+               DisplayName = $displayLabel; MaxLength = $effectiveMaxLength; Format = $StringFormat; RequiredLevel = $requiredLevel }
             if ($AutoNumberFormat) {
                 # Per Microsoft's own docs: Format/FormatName must be Text for
                 # an autonumber column - fail loudly here rather than let
@@ -1208,7 +1232,7 @@ function Add-DataverseColumn {
         }
         'Memo' {
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.MemoAttributeMetadata'; SchemaName = $SchemaName
-               DisplayName = $displayLabel; MaxLength = $MaxLength }
+               DisplayName = $displayLabel; MaxLength = $effectiveMaxLength }
         }
         'Integer' {
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.IntegerAttributeMetadata'; SchemaName = $SchemaName
@@ -1527,6 +1551,182 @@ function New-LayoutXml {
     param([Parameter(Mandatory)] [string] $EntityLogicalName, [Parameter(Mandatory)] [string[]] $Attributes)
     $cellXml = ($Attributes | ForEach-Object { "<cell name=`"$_`" width=`"150`" />" }) -join ''
     return "<grid name=`"resultset`" object=`"1`" jump=`"$($Attributes[0])`" select=`"1`" icon=`"1`" preview=`"1`"><row name=`"result`" id=`"$($EntityLogicalName)id`">$cellXml</row></grid>"
+}
+
+# --- Forms ------------------------------------------------------------------------
+# Adds fields to a table's existing, auto-generated Main form - never builds
+# a <form> root envelope from scratch. Microsoft's own dataverse-skills
+# reference (github.com/microsoft/dataverse-skills) is explicit that a
+# hand-authored form root is "the #1 cause of 'required id' / schema-
+# rejection errors," and recommends retrieving a live form as a template and
+# mutating it instead - every table already has one the moment it's
+# created, so there's always a real template available. See
+# references/form-support.md for the full reasoning, the classid citation,
+# and what this deliberately doesn't support yet (Quick Create/Quick View/
+# Card form types, Image/File fields, custom tab/section layout - every
+# added field goes into the template's first section, in the order given).
+
+$script:FormControlClassIds = @{
+    # Sourced from microsoft/dataverse-skills' forms-and-views.md reference -
+    # see references/form-support.md for the citation. Image/File are
+    # deliberately absent: no confirmed classid for either, and this module
+    # doesn't guess at a value scheme it hasn't verified.
+    String   = '{4273EDBD-AC1D-40d3-9FB2-095C621B552D}'
+    Memo     = '{E0DECE4B-6FC8-4a8f-A065-082708572369}'
+    Integer  = '{C6D124CA-7EDA-4a60-AEA9-7FB8D318B68F}'
+    Decimal  = '{C3EFE0C3-0EC6-42be-8349-CBD9079C5A6F}'
+    Money    = '{533B9108-5A8B-42cb-BD37-52D1B8E7C741}'
+    DateOnly = '{5B773807-9FB2-42db-97C3-7A91EFF8ADFF}'
+    DateTime = '{5B773807-9FB2-42db-97C3-7A91EFF8ADFF}'
+    Boolean  = '{67FAC785-CD58-4f9f-ABB3-4B7DDC6ED5ED}'
+    Choice   = '{3EF39988-22BB-4f0b-BBBE-64B5A3748AEE}'
+    Lookup   = '{270BD3DB-D9AF-4782-9025-509E298DEC0A}'
+}
+
+function Get-DataverseFormControlClassId {
+    <#
+    .SYNOPSIS
+        Resolves the FormXML control classid for a column type or a lookup -
+        throws for anything this module doesn't have a verified classid for,
+        rather than guessing.
+    .PARAMETER FieldKind
+        One of this module's own column -Type values (String, Memo,
+        Integer, Decimal, Money, DateOnly, DateTime, Boolean, Choice), or
+        the literal 'Lookup' for a relationship field.
+    #>
+    param([Parameter(Mandatory)] [string] $FieldKind)
+    if ($script:FormControlClassIds.ContainsKey($FieldKind)) {
+        return $script:FormControlClassIds[$FieldKind]
+    }
+    throw "No verified form control classid for field kind '$FieldKind' - Image/File columns aren't supported on forms by this module yet. See references/form-support.md."
+}
+
+function Get-DataverseMainForm {
+    <#
+    .SYNOPSIS
+        Retrieves a table's Main form (systemform type=2) - the live
+        template Add-DataverseFormFields mutates rather than building a form
+        from scratch. Returns $null if none exists (unexpected for any
+        table - Dataverse auto-generates one at table creation - but this
+        function reports that rather than assuming).
+    #>
+    param([Parameter(Mandatory)] [string] $EntityLogicalName)
+    $result = Invoke-DataverseApi -Method Get -Path (
+        "systemforms?`$filter=objecttypecode eq '$EntityLogicalName' and type eq 2" +
+        "&`$select=formid,name,formxml"
+    ) -SuppressNotFoundError
+    if (Test-DataverseNotFound $result) { return $null }
+    return $result.value[0]
+}
+
+function Add-DataverseFormField {
+    <#
+    .SYNOPSIS
+        Mutates a parsed FormXML [xml] document in place, adding one field
+        to the end of its first <section> - idempotent, returns $false
+        (does nothing) if a control for this field already exists anywhere
+        on the form.
+    .DESCRIPTION
+        Builds the new <row><cell><labels>/<control> fragment via DOM
+        methods (CreateElement/SetAttribute), not string concatenation into
+        the document - a display label containing a quote or special
+        character would corrupt a hand-templated XML string in a way DOM
+        construction can't.
+    #>
+    param(
+        [Parameter(Mandatory)] [System.Xml.XmlDocument] $FormXmlDocument,
+        [Parameter(Mandatory)] [string] $DataFieldName,
+        [Parameter(Mandatory)] [string] $DisplayLabel,
+        [Parameter(Mandatory)] [string] $ClassId,
+        [int] $LanguageCode = 1033
+    )
+
+    if ($FormXmlDocument.SelectSingleNode("//control[@datafieldname='$DataFieldName']")) {
+        return $false
+    }
+
+    $section = $FormXmlDocument.SelectSingleNode('//section')
+    if (-not $section) {
+        throw "No <section> found in the Main form's FormXML to add '$DataFieldName' to - this template form has an unexpected shape this module doesn't know how to handle."
+    }
+
+    $rows = $section.SelectSingleNode('rows')
+    if (-not $rows) {
+        $rows = $FormXmlDocument.CreateElement('rows')
+        $section.AppendChild($rows) | Out-Null
+    }
+
+    $row = $FormXmlDocument.CreateElement('row')
+    $cell = $FormXmlDocument.CreateElement('cell')
+    $cell.SetAttribute('id', ([guid]::NewGuid().ToString()))
+    $cell.SetAttribute('showlabel', 'true')
+
+    $labels = $FormXmlDocument.CreateElement('labels')
+    $label = $FormXmlDocument.CreateElement('label')
+    $label.SetAttribute('description', $DisplayLabel)
+    $label.SetAttribute('languagecode', $LanguageCode)
+    $labels.AppendChild($label) | Out-Null
+    $cell.AppendChild($labels) | Out-Null
+
+    $control = $FormXmlDocument.CreateElement('control')
+    $control.SetAttribute('id', $DataFieldName)
+    $control.SetAttribute('classid', $ClassId)
+    $control.SetAttribute('datafieldname', $DataFieldName)
+    $control.SetAttribute('disabled', 'false')
+    $cell.AppendChild($control) | Out-Null
+
+    $row.AppendChild($cell) | Out-Null
+    $rows.AppendChild($row) | Out-Null
+
+    return $true
+}
+
+function Add-DataverseFormFields {
+    <#
+    .SYNOPSIS
+        Idempotently adds a set of fields to a table's existing Main form.
+        Only PUTs and publishes if at least one field actually needed
+        adding - an unmodified form is left alone, matching this module's
+        create-if-missing philosophy elsewhere.
+    .PARAMETER Fields
+        Array of @{ SchemaName; DisplayName; ClassId }, resolved by the
+        caller from the spec's own column/lookup declarations via
+        Get-DataverseFormControlClassId - this function itself never infers
+        a field's type.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $EntityLogicalName,
+        [Parameter(Mandatory)] [hashtable[]] $Fields,
+        [Parameter(Mandatory)] [string] $SolutionUniqueName
+    )
+
+    $form = Get-DataverseMainForm -EntityLogicalName $EntityLogicalName
+    if (-not $form) {
+        throw "No Main form found for '$EntityLogicalName' - every table should have one auto-generated at creation. Something unexpected happened upstream; this module doesn't create a form from scratch."
+    }
+
+    [xml] $formXmlDoc = $form.formxml
+    $anyAdded = $false
+
+    foreach ($field in $Fields) {
+        $added = Add-DataverseFormField -FormXmlDocument $formXmlDoc -DataFieldName $field.SchemaName `
+            -DisplayLabel $field.DisplayName -ClassId $field.ClassId
+        if ($added) {
+            Write-Host "  add    $EntityLogicalName main form: $($field.SchemaName)"
+            $anyAdded = $true
+        }
+        else {
+            Write-Host "  skip   $EntityLogicalName main form: $($field.SchemaName) (already present)"
+        }
+    }
+
+    if (-not $anyAdded) {
+        return
+    }
+
+    Invoke-DataverseApi -Method Patch -Path "systemforms($($form.formid))" -Body @{ formxml = $formXmlDoc.OuterXml } -SolutionUniqueName $SolutionUniqueName | Out-Null
+    Publish-DataverseEntity -EntityLogicalName $EntityLogicalName
 }
 
 # --- Field security ---------------------------------------------------------------
@@ -1852,6 +2052,30 @@ function Show-DataverseWhatIfPlan {
             }
             else {
                 Write-Host "  create relationship $($lookup.relationshipSchemaName) ($($table.logicalName).$($lookup.lookupSchemaName.ToLowerInvariant()) -> $($lookup.referencedEntity))"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: main form fields =="
+    foreach ($table in (Get-DataverseOptionalArray $Spec 'tables')) {
+        $mainForm = Get-DataverseOptionalValue $table 'mainForm'
+        if (-not $mainForm) { continue }
+        $fieldNames = Get-DataverseOptionalArray $mainForm 'fields'
+        if ($fieldNames.Count -eq 0) { continue }
+
+        $form = Get-DataverseMainForm -EntityLogicalName $table.logicalName
+        if (-not $form) {
+            Write-Host "  create $($table.logicalName) main form fields ($($fieldNames.Count) requested) - table/form doesn't exist yet, would be created fresh on deploy"
+            continue
+        }
+        [xml] $formXmlDoc = $form.formxml
+        foreach ($fieldName in $fieldNames) {
+            if ($formXmlDoc.SelectSingleNode("//control[@datafieldname='$fieldName']")) {
+                Write-Host "  skip   $($table.logicalName) main form: $fieldName (already present)"
+            }
+            else {
+                Write-Host "  create $($table.logicalName) main form: $fieldName"
             }
         }
     }

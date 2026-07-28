@@ -66,14 +66,18 @@ Propose at least one role per user type implied by the requirements, expressed a
 
 Propose a small number of views per table that matter for daily use — not one per possible filter combination. **Before finalizing a view's name, check it against the reserved-pattern list in `references/choice-and-column-conventions.md`** ("Active {Plural}", "Inactive {Plural}", "My {Plural}") — Dataverse auto-generates views with these exact names the moment a table is created, and a same-name custom view silently never gets created if it collides. This was hit directly building the reference implementation for this plugin.
 
-### 10. Produce the ER diagram and write the spec
+### 10. Sketch main form fields
+
+For each table, propose which columns/lookups belong on its Main form, in a sensible order (the primary attribute first, then the fields a user would actually fill in or reference day to day) — not necessarily every column, and not a decision to leave silently to Dataverse's own auto-generated default (which only ever has the primary name field). Write the chosen ones into that table's `mainForm.fields` in the spec. See `../deploy-dataverse-schema/references/form-support.md` for what the deploy skill can actually do with this: Main form only, no custom tab/section layout, and `Image`/`File` columns can't be added this way (no verified control classid) — don't propose those for `mainForm.fields`.
+
+### 11. Produce the ER diagram and write the spec
 
 Render a Mermaid ER diagram of the full proposed model (`erDiagram` syntax) so the human can review the shape before approving anything.
 
-Write the complete design — tables, columns (with types, global choice references, required/optional), relationships (with cascade behavior), alternate keys, security role table, and views — to a spec file (default: `dataverse-schema.json` in the current working directory; ask if the user wants a different name or location). JSON, not YAML: PowerShell parses it with zero extra modules (`ConvertFrom-Json` is built in), which matters since this whole plugin avoids external dependencies deliberately. Use the structure documented in `../deploy-dataverse-schema/references/spec-format.md` exactly — the deploy skill parses this file and expects that shape.
+Write the complete design — tables, columns (with types, global choice references, required/optional), relationships (with cascade behavior), alternate keys, security role table, views, and main form fields — to a spec file (default: `dataverse-schema.json` in the current working directory; ask if the user wants a different name or location). JSON, not YAML: PowerShell parses it with zero extra modules (`ConvertFrom-Json` is built in), which matters since this whole plugin avoids external dependencies deliberately. Use the structure documented in `../deploy-dataverse-schema/references/spec-format.md` exactly — the deploy skill parses this file and expects that shape.
 
 **Optional, opt-in cross-check:** if a `solution-layout.json` file (see `../validate-solution-structure/references/solution-layout-format.md`) exists in the working directory, read it — it's a local file, no Dataverse call needed — and find the layer whose `allowedComponentTypes` includes `1` (Entity, i.e. the layer meant to own tables). If that layer's `solutionUniqueName` doesn't match the `solutionUniqueName` you're about to write into this spec, flag the mismatch and ask which one is actually intended before writing the file — don't silently pick one. If no such file exists, say nothing and proceed exactly as before; this check only ever engages for someone who has already declared a layered-solution topology, and never changes behavior otherwise. This is the only place this skill touches solution-layout awareness — the deeper structural checks (drift, cross-layer duplicates, publisher consistency) are `validate-solution-structure`'s job, not this skill's.
 
-### 11. Get explicit approval before ending
+### 12. Get explicit approval before ending
 
 State plainly that nothing has been created yet, that the spec file is ready for review, and that running `deploy-dataverse-schema` is the next step once the human is satisfied. Do not suggest the deploy skill runs automatically — that transition is always a separate, deliberate action.

@@ -24,7 +24,9 @@ This skill executes an **already-approved** spec file. It never designs anything
 
 The script validates the spec's shape before making any API call (required fields, valid enum values for ownership/column types/cascade names) and fails fast with a specific message rather than partway through a partially-applied deploy.
 
-Processing order is fixed regardless of the spec file's own array ordering — see `references/spec-format.md` for exactly why: publisher & solution (only if the spec declares `publisherUniqueName` — see below) → global choices → tables → columns → relationships → alternate keys → views → security roles → field security. Every step is create-if-missing, so re-running the same spec after fixing one failure is always safe — nothing gets recreated, and the run picks up wherever it left off.
+Processing order is fixed regardless of the spec file's own array ordering — see `references/spec-format.md` for exactly why: publisher & solution (only if the spec declares `publisherUniqueName` — see below) → global choices → tables → columns → relationships → main form fields → alternate keys → views → security roles → field security. Every step is create-if-missing, so re-running the same spec after fixing one failure is always safe — nothing gets recreated, and the run picks up wherever it left off.
+
+**A table can declare `mainForm.fields`** — an ordered list of its own column/lookup schema names to add to its existing Main form. This mutates the live, auto-generated form rather than building one from scratch — see `references/form-support.md` for why, the classid table it's built from, and what's not supported (only Main forms; no custom tab/section layout; no `Image`/`File` fields).
 
 **A spec can declare `publisherUniqueName`/`publisherFriendlyName`/`publisherPrefix` (all three, or none) to opt into automatic publisher and solution creation** — the case a brand-new environment needs, where neither exists yet. Omitting all three (the default, and what every spec written before this existed already does) assumes the publisher and solution already exist, exactly as before.
 
@@ -38,7 +40,7 @@ Every line is either `create` (something new was made) or `skip` (it already exi
 
 **Alternate keys may log `active`, or a "still building" warning** — the latter means the index is still building in the background (expected for a table with a lot of existing data) and is not a deploy failure; re-running later will confirm it reached `Active`.
 
-**A `publish` line only appears when a field-level security change happened.** Every create call in this module is auto-published by Dataverse itself (confirmed against Microsoft's own docs); the one exception is marking a column `IsSecured`, an update to something that already existed, which this module explicitly publishes right after making it. No other step needs this, and none of them call it.
+**A `publish` line appears after a field-level security change or a main-form field addition — never after anything else.** Every create call in this module is auto-published by Dataverse itself (confirmed against Microsoft's own docs); the two exceptions are both updates to something that already existed, not creates: marking a column `IsSecured`, and adding fields to a table's existing Main form. No other step needs this, and none of them call it.
 
 ## After a successful run
 
@@ -47,5 +49,5 @@ Report what was actually created vs. skipped — don't just say "done." If secur
 ## Not handled yet — say so rather than pretending otherwise
 
 - **Rollup columns.** These need a FetchXML aggregate definition, a different mechanism than the rest of column creation, and aren't in `Dataverse.psm1` yet. If the spec calls for one, flag it explicitly as unsupported rather than silently skipping it.
-- **Custom forms.** Only Dataverse's auto-generated main form exists after this runs. Form layout is a separate, presentation-focused pass.
+- **Quick Create, Quick View, and Card forms, and custom tab/section layout on the Main form.** `mainForm.fields` only adds columns/lookups to the existing Main form's first section, in order — see `references/form-support.md`. `Image`/`File` fields can't be added to a form either (no verified control classid).
 - **Security role / field security profile membership** (which users or teams hold a role or profile) — creating the container is this skill's job; populating its membership is a deliberate follow-up step, usually because the relevant teams don't exist as real records yet at design time.

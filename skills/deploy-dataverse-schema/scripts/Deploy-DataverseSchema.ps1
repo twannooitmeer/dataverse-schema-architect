@@ -6,10 +6,12 @@
 .DESCRIPTION
     Fixed processing order regardless of the spec file's own array order:
     global choices -> tables + primary attribute -> columns -> lookups ->
-    alternate keys -> views -> security roles -> field security profiles.
-    This mirrors the validated order from the reference implementation this
-    plugin generalizes from - each category depends on the ones before it
-    existing first.
+    main form fields -> alternate keys -> views -> security roles -> field
+    security profiles. This mirrors the validated order from the reference
+    implementation this plugin generalizes from - each category depends on
+    the ones before it existing first. Main form fields come right after
+    lookups specifically because a field can't be added to a form before
+    the column/lookup it references exists as a real attribute.
 
     Every step is create-if-missing, via Dataverse.psm1 - safe to re-run the
     same spec file after fixing one failure partway through.
@@ -221,7 +223,39 @@ foreach ($table in $spec.tables) {
     }
 }
 
-# --- 5. Alternate keys ------------------------------------------------------------
+# --- 5. Main form fields -----------------------------------------------------------
+# Opt-in per table: only runs if the table declares mainForm.fields. Adds
+# each named column/lookup to the table's existing, auto-generated Main
+# form - see Add-DataverseFormFields in Dataverse.psm1 for why this mutates
+# a live template rather than building a form from scratch, and why Quick
+# Create/Quick View/Card form types aren't supported yet.
+
+Write-Host ""
+Write-Host "== Main form fields =="
+foreach ($table in $spec.tables) {
+    $mainForm = Get-DataverseOptionalValue $table 'mainForm'
+    if (-not $mainForm) { continue }
+    $fieldNames = Get-DataverseOptionalArray $mainForm 'fields'
+    if ($fieldNames.Count -eq 0) { continue }
+
+    $resolvedFields = foreach ($fieldName in $fieldNames) {
+        $column = $table.columns | Where-Object { $_.schemaName -eq $fieldName } | Select-Object -First 1
+        if ($column) {
+            @{ SchemaName = $fieldName; DisplayName = $column.displayName; ClassId = Get-DataverseFormControlClassId -FieldKind $column.type }
+            continue
+        }
+        $lookup = $table.lookups | Where-Object { $_.lookupSchemaName -eq $fieldName } | Select-Object -First 1
+        if ($lookup) {
+            @{ SchemaName = $fieldName; DisplayName = $lookup.lookupDisplayName; ClassId = Get-DataverseFormControlClassId -FieldKind 'Lookup' }
+            continue
+        }
+        throw "Table '$($table.logicalName)' mainForm.fields references '$fieldName', which isn't declared in this table's own columns or lookups."
+    }
+
+    Add-DataverseFormFields -EntityLogicalName $table.logicalName -Fields $resolvedFields -SolutionUniqueName $spec.solutionUniqueName
+}
+
+# --- 6. Alternate keys ------------------------------------------------------------
 
 Write-Host ""
 Write-Host "== Alternate keys =="
@@ -232,7 +266,7 @@ foreach ($table in $spec.tables) {
     }
 }
 
-# --- 6. Views ---------------------------------------------------------------------
+# --- 7. Views ---------------------------------------------------------------------
 
 Write-Host ""
 Write-Host "== Views =="
@@ -248,7 +282,7 @@ foreach ($view in $spec.views) {
         -LayoutXml $layoutXml -PluralDisplayName $pluralDisplayName -SolutionUniqueName $spec.solutionUniqueName
 }
 
-# --- 7. Security roles -------------------------------------------------------------
+# --- 8. Security roles -------------------------------------------------------------
 
 Write-Host ""
 Write-Host "== Security roles =="
@@ -260,7 +294,7 @@ if ($spec.securityRoles -and $spec.securityRoles.Count -gt 0) {
     }
 }
 
-# --- 8. Field security profiles -----------------------------------------------------
+# --- 9. Field security profiles -----------------------------------------------------
 
 Write-Host ""
 Write-Host "== Field security =="

@@ -34,8 +34,8 @@ Name custom views to describe what they actually filter on (e.g. "Achieved & Exp
 
 | Concept | Dataverse type | Notes |
 |---|---|---|
-| Short text | String | Set `MaxLength` deliberately, not to whatever the designer defaults to |
-| Long text | Memo | |
+| Short text | String | Set `maxLength` deliberately, not to whatever the deploy skill defaults to (100) |
+| Long text | Memo | The deploy skill defaults `maxLength` to 2000 if left unset, but treat that as a fallback, not a real answer — a `Memo` column meant to hold actual prose (a disclaimer, a description) should almost always get an explicit `maxLength` sized to what the content genuinely needs |
 | Whole number | Integer | Set explicit Min/Max where the domain has real bounds |
 | Precise decimal | Decimal | Set `Precision` explicitly |
 | Currency amount | Money | |

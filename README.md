@@ -69,7 +69,7 @@ Review the proposed model and the generated spec file, then:
 ## Not yet supported
 
 - Rollup columns (need a FetchXML aggregate definition — different mechanism than the rest of column creation)
-- Custom forms (Dataverse's auto-generated main form is left as-is)
+- Quick Create, Quick View, and Card forms, and custom tab/section layout on the Main form (a table's `mainForm.fields` adds columns/lookups to its existing auto-generated Main form only — see [`form-support.md`](skills/deploy-dataverse-schema/references/form-support.md))
 - Security role / field security profile membership (creating the role or profile is supported; assigning users or teams to it is a separate, deliberate step)
 
 ## License
