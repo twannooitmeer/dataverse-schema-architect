@@ -6,7 +6,7 @@ Every rule here traces back to something that actually broke while building the 
 
 Every `New-Dataverse*` / `Add-Dataverse*` function in `Dataverse.psm1` requires `-SolutionUniqueName` and sends it as the `MSCRM.SolutionUniqueName` request header. There is no code path that creates something without it.
 
-**Why:** without an explicit target, a component lands in whatever solution the environment currently has selected as default — which can silently be the wrong one, and is exactly the kind of mistake that's invisible until someone goes looking for a component and can't find it in the solution they expected. Microsoft's own `add-dataverse` reference doesn't explicitly address this at all, which is the specific gap this plugin closes rather than inherits.
+**Why:** without an explicit target, a component lands in whatever solution the environment currently has selected as default — which can silently be the wrong one, and is exactly the kind of mistake that's invisible until someone goes looking for a component and can't find it in the solution they expected.
 
 **Enforced by:** the mandatory PowerShell parameter (fails immediately if omitted, not just documented as required) and `hooks/validate-solution-targeting.js`.
 
