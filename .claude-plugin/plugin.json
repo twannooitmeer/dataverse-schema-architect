@@ -1,6 +1,6 @@
 {
   "name": "dataverse-schema-architect",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Design and deploy Dataverse tables, global choices, relationships, alternate keys, views and security roles with safety defaults an environment's default solution and picklist habits won't quietly undermine. Also checks solution structure against a declared horizontal-segmentation topology.",
   "author": {
     "name": "Twan Nooitmeer"
