@@ -37,72 +37,14 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot '../../deploy-dataverse-schema/scripts/Dataverse.psm1') -Force
 
-if (-not (Test-Path $LayoutPath)) {
-    throw "Solution layout file not found: $LayoutPath. See ../references/solution-layout-format.md for the expected shape."
-}
-
-$layout = Get-Content -Path $LayoutPath -Raw | ConvertFrom-Json -Depth 10
-
 # --- Validate shape before making any API call ----------------------------------
+# Get-DataverseSolutionLayout (in Dataverse.psm1) does the shape validation
+# and dependsOn cycle detection - shared with scaffold-solution-structure's
+# own script, rather than duplicated here. See references/checks.md for why
+# the actual, Dataverse-enforced import order isn't separately verified.
 
-if (-not $layout.publisherUniqueName) {
-    throw "Layout is missing required top-level 'publisherUniqueName'. Every layer's solution is expected to share this publisher - see references/checks.md for why that's checked first."
-}
-if (-not $layout.layers -or @($layout.layers).Count -eq 0) {
-    throw "Layout has no 'layers' - nothing to check. See references/solution-layout-format.md."
-}
-
-$layerNames = @{}
-foreach ($layer in $layout.layers) {
-    if (-not $layer.name) { throw "A layer is missing required 'name'." }
-    if ($layerNames.ContainsKey($layer.name)) { throw "Layer name '$($layer.name)' is declared more than once - names must be unique within one layout file." }
-    if (-not $layer.solutionUniqueName) { throw "Layer '$($layer.name)' is missing required 'solutionUniqueName'." }
-    $layerNames[$layer.name] = $layer
-}
-
-foreach ($layer in $layout.layers) {
-    foreach ($dep in @($layer.dependsOn)) {
-        if (-not $layerNames.ContainsKey($dep)) {
-            throw "Layer '$($layer.name)' declares dependsOn '$dep', which doesn't match any layer's 'name' in this file."
-        }
-    }
-}
-
-# Cycle detection over the dependsOn graph - plain DFS with a recursion-stack
-# set, same idea as any topological-sort cycle check. This is the one check
-# in this script that never touches the network - see references/checks.md
-# for why the actual, Dataverse-enforced import order isn't verified here.
-function Test-DependencyCycle {
-    param([hashtable] $LayerNames)
-
-    $visited = @{}
-    $inStack = @{}
-
-    function Visit {
-        param([string] $Name, [hashtable] $LayerNames, [hashtable] $Visited, [hashtable] $InStack)
-        if ($InStack[$Name]) { return $Name }
-        if ($Visited[$Name]) { return $null }
-        $Visited[$Name] = $true
-        $InStack[$Name] = $true
-        foreach ($dep in @($LayerNames[$Name].dependsOn)) {
-            $cycleAt = Visit -Name $dep -LayerNames $LayerNames -Visited $Visited -InStack $InStack
-            if ($cycleAt) { return $cycleAt }
-        }
-        $InStack[$Name] = $false
-        return $null
-    }
-
-    foreach ($name in $LayerNames.Keys) {
-        $cycleAt = Visit -Name $name -LayerNames $LayerNames -Visited $visited -InStack $inStack
-        if ($cycleAt) { return $cycleAt }
-    }
-    return $null
-}
-
-$cycleAt = Test-DependencyCycle -LayerNames $layerNames
-if ($cycleAt) {
-    throw "Layout's dependsOn graph has a cycle involving layer '$cycleAt'. Fix the declared dependencies before running this check against a live environment."
-}
+$resolved = Get-DataverseSolutionLayout -LayoutPath $LayoutPath
+$layout = $resolved.Layout
 
 Write-Host "Layout validated: $($layout.layers.Count) layers, publisher '$($layout.publisherUniqueName)', no dependency cycle."
 Write-Host ""

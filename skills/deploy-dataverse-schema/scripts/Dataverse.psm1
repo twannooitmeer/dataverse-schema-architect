@@ -742,6 +742,47 @@ function Test-DataverseNotFound {
     return $Response.value.Count -eq 0
 }
 
+function Get-DataverseOptionalValue {
+    <#
+    .SYNOPSIS
+        Safely reads a possibly-absent property from a parsed JSON object
+        (a spec, a solution-layout, an API response) under this module's
+        own strict mode.
+    .DESCRIPTION
+        Returns $null rather than throwing "property cannot be found" when
+        the property is genuinely absent - not just null - which is the
+        normal shape of an optional field in human-authored or
+        partially-optional external JSON (an omitted key legitimately means
+        "not set," not a typo). This exact bug - bare dot-access to an
+        absent property throwing under Set-StrictMode - has been hit and
+        fixed independently four times already while building this module
+        (Deploy-DataverseSchema.ps1 disables strict mode entirely for this
+        reason; Get-DataverseSolutionComponents' @odata.nextLink handling;
+        Show-DataverseWhatIfPlan's spec walk; Get-DataverseSolutionLayout's
+        publisherUniqueName check). Use this - or Get-DataverseOptionalArray
+        for a collection property - instead of a bare dot-access on
+        anything not guaranteed present by a `[Parameter(Mandatory)]`
+        PowerShell parameter or prior validation in the same function.
+    #>
+    param($Object, [string] $Name)
+    $prop = $Object.PSObject.Properties[$Name]
+    if (-not $prop) { return $null }
+    return $prop.Value
+}
+
+function Get-DataverseOptionalArray {
+    <#
+    .SYNOPSIS
+        Same reasoning as Get-DataverseOptionalValue, for a property that's
+        meant to be enumerated - always returns an array (empty if the
+        property is absent or null), never throws, never returns $null.
+    #>
+    param($Object, [string] $Name)
+    $value = Get-DataverseOptionalValue -Object $Object -Name $Name
+    if ($null -eq $value) { return @() }
+    return @($value)
+}
+
 # --- Cascade presets ------------------------------------------------------------
 # Named presets only - see the module header remark on why raw cascade
 # configuration objects are not an option this module exposes.
@@ -836,10 +877,25 @@ function Test-DataverseColumnDrift {
 # happens to be missing (that absence might mean a typo in the spec, not
 # "please create it").
 
-function Test-DataversePublisher {
+function Get-DataversePublisherId {
+    <#
+    .SYNOPSIS
+        Resolves a publisher's id from its unique name, or $null if it
+        doesn't exist - the one place this lookup is written, shared by
+        Test-DataversePublisher, New-DataversePublisher, and
+        scaffold-solution-structure's own script (which needs the id
+        without necessarily having the fields to create the publisher if
+        it's missing).
+    #>
     param([Parameter(Mandatory)] [string] $UniqueName)
     $result = Invoke-DataverseApi -Method Get -Path "publishers?`$filter=uniquename eq '$UniqueName'&`$select=publisherid" -SuppressNotFoundError
-    return -not (Test-DataverseNotFound $result)
+    if (Test-DataverseNotFound $result) { return $null }
+    return $result.value[0].publisherid
+}
+
+function Test-DataversePublisher {
+    param([Parameter(Mandatory)] [string] $UniqueName)
+    return $null -ne (Get-DataversePublisherId -UniqueName $UniqueName)
 }
 
 function New-DataversePublisher {
@@ -860,9 +916,10 @@ function New-DataversePublisher {
         [int] $LanguageCode = 1033
     )
 
-    if (Test-DataversePublisher -UniqueName $UniqueName) {
+    $existingId = Get-DataversePublisherId -UniqueName $UniqueName
+    if ($existingId) {
         Write-Host "  skip   publisher $UniqueName"
-        return (Invoke-DataverseApi -Method Get -Path "publishers?`$filter=uniquename eq '$UniqueName'&`$select=publisherid").value[0].publisherid
+        return $existingId
     }
 
     $body = @{
@@ -873,7 +930,7 @@ function New-DataversePublisher {
     }
     Invoke-DataverseApi -Method Post -Path 'publishers' -Body $body | Out-Null
     Write-Host "  create publisher $UniqueName (prefix: $Prefix)"
-    return (Invoke-DataverseApi -Method Get -Path "publishers?`$filter=uniquename eq '$UniqueName'&`$select=publisherid").value[0].publisherid
+    return Get-DataversePublisherId -UniqueName $UniqueName
 }
 
 function New-DataverseSolution {
@@ -1745,57 +1802,37 @@ function Show-DataverseWhatIfPlan {
     # exactly this reason (an omitted optional array key, e.g. a table with
     # no lookups, is a legitimate "none", not a typo). This function can't
     # do the same, since it lives in this module alongside code that *does*
-    # want strict mode - so instead every optional array property is read
-    # through this helper, which returns @() for "absent" rather than
-    # letting a bare dot-access throw "property cannot be found". This is
-    # the exact bug once already hit in Deploy-DataverseSchema.ps1 itself,
-    # reintroduced here on first real use against a table with no lookups
-    # in a live deploy - fixed here the same way, not by disabling strict
-    # mode module-wide.
-    function Get-SpecArray {
-        param($Object, [string] $Name)
-        $prop = $Object.PSObject.Properties[$Name]
-        if (-not $prop -or $null -eq $prop.Value) { return @() }
-        return @($prop.Value)
-    }
-    # Same reasoning as Get-SpecArray, for a scalar optional property
-    # instead of an array one - publisherUniqueName/publisherPrefix are
-    # genuinely absent on any spec not opting into publisher/solution
-    # auto-creation, not just empty.
-    function Get-SpecValue {
-        param($Object, [string] $Name)
-        $prop = $Object.PSObject.Properties[$Name]
-        if (-not $prop) { return $null }
-        return $prop.Value
-    }
+    # want strict mode - so every optional property is read through
+    # Get-DataverseOptionalValue/Get-DataverseOptionalArray instead of a
+    # bare dot-access that would throw "property cannot be found".
 
     Write-Host "== What if: publisher & solution =="
-    $publisherUniqueName = Get-SpecValue $Spec 'publisherUniqueName'
+    $publisherUniqueName = Get-DataverseOptionalValue $Spec 'publisherUniqueName'
     if ($publisherUniqueName) {
         if (Test-DataversePublisher -UniqueName $publisherUniqueName) { Write-Host "  skip   publisher $publisherUniqueName" }
-        else { Write-Host "  create publisher $publisherUniqueName (prefix: $(Get-SpecValue $Spec 'publisherPrefix'))" }
+        else { Write-Host "  create publisher $publisherUniqueName (prefix: $(Get-DataverseOptionalValue $Spec 'publisherPrefix'))" }
     }
     if (Get-DataverseSolutionByUniqueName -UniqueName $Spec.solutionUniqueName) { Write-Host "  skip   solution $($Spec.solutionUniqueName)" }
     else { Write-Host "  create solution $($Spec.solutionUniqueName)" }
 
     Write-Host ""
     Write-Host "== What if: global choices =="
-    foreach ($choice in (Get-SpecArray $Spec 'globalChoices')) {
+    foreach ($choice in (Get-DataverseOptionalArray $Spec 'globalChoices')) {
         if (Test-DataverseGlobalChoice -Name $choice.name) { Write-Host "  skip   global choice $($choice.name)" }
         else { Write-Host "  create global choice $($choice.name) ($($choice.options.Count) options)" }
     }
 
     Write-Host ""
     Write-Host "== What if: tables =="
-    foreach ($table in (Get-SpecArray $Spec 'tables')) {
+    foreach ($table in (Get-DataverseOptionalArray $Spec 'tables')) {
         if (Test-DataverseTable -LogicalName $table.logicalName) { Write-Host "  skip   table $($table.logicalName)" }
         else { Write-Host "  create table $($table.logicalName)" }
     }
 
     Write-Host ""
     Write-Host "== What if: columns =="
-    foreach ($table in (Get-SpecArray $Spec 'tables')) {
-        foreach ($column in (Get-SpecArray $table 'columns')) {
+    foreach ($table in (Get-DataverseOptionalArray $Spec 'tables')) {
+        foreach ($column in (Get-DataverseOptionalArray $table 'columns')) {
             $attributeLogicalName = $column.schemaName.ToLowerInvariant()
             if (Test-DataverseColumn -EntityLogicalName $table.logicalName -AttributeLogicalName $attributeLogicalName) {
                 Write-Host "  skip   $($table.logicalName).$attributeLogicalName"
@@ -1808,8 +1845,8 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: relationships =="
-    foreach ($table in (Get-SpecArray $Spec 'tables')) {
-        foreach ($lookup in (Get-SpecArray $table 'lookups')) {
+    foreach ($table in (Get-DataverseOptionalArray $Spec 'tables')) {
+        foreach ($lookup in (Get-DataverseOptionalArray $table 'lookups')) {
             if (Test-DataverseRelationship -SchemaName $lookup.relationshipSchemaName) {
                 Write-Host "  skip   relationship $($lookup.relationshipSchemaName)"
             }
@@ -1821,8 +1858,8 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: alternate keys =="
-    foreach ($table in (Get-SpecArray $Spec 'tables')) {
-        foreach ($key in (Get-SpecArray $table 'alternateKeys')) {
+    foreach ($table in (Get-DataverseOptionalArray $Spec 'tables')) {
+        foreach ($key in (Get-DataverseOptionalArray $table 'alternateKeys')) {
             if (Test-DataverseAlternateKey -EntityLogicalName $table.logicalName -KeySchemaName $key.schemaName) {
                 Write-Host "  skip   alternate key $($table.logicalName).$($key.schemaName)"
             }
@@ -1834,8 +1871,8 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: views =="
-    foreach ($view in (Get-SpecArray $Spec 'views')) {
-        $table = (Get-SpecArray $Spec 'tables') | Where-Object { $_.logicalName -eq $view.entityLogicalName } | Select-Object -First 1
+    foreach ($view in (Get-DataverseOptionalArray $Spec 'views')) {
+        $table = (Get-DataverseOptionalArray $Spec 'tables') | Where-Object { $_.logicalName -eq $view.entityLogicalName } | Select-Object -First 1
         $pluralDisplayName = if ($table) { $table.pluralDisplayName } else { $view.entityLogicalName }
 
         if (Test-DataverseAutoGeneratedViewCollision -PluralDisplayName $pluralDisplayName -ProposedName $view.name) {
@@ -1852,7 +1889,7 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: security roles =="
-    foreach ($role in (Get-SpecArray $Spec 'securityRoles')) {
+    foreach ($role in (Get-DataverseOptionalArray $Spec 'securityRoles')) {
         $existing = Invoke-DataverseApi -Method Get -Path "roles?`$filter=name eq '$($role.name)'&`$select=roleid" -SuppressNotFoundError
         if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   security role $($role.name)" }
         else { Write-Host "  create security role $($role.name) (existence only - privilege-level diffing not previewed)" }
@@ -1860,7 +1897,7 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: field security =="
-    foreach ($profile in (Get-SpecArray $Spec 'fieldSecurityProfiles')) {
+    foreach ($profile in (Get-DataverseOptionalArray $Spec 'fieldSecurityProfiles')) {
         $existing = Invoke-DataverseApi -Method Get -Path "fieldsecurityprofiles?`$filter=name eq '$($profile.name)'&`$select=fieldsecurityprofileid" -SuppressNotFoundError
         if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   field security profile $($profile.name) (permission-level diffing not previewed)" }
         else { Write-Host "  create field security profile $($profile.name) (permission-level diffing not previewed)" }
@@ -1868,14 +1905,22 @@ function Show-DataverseWhatIfPlan {
 }
 
 # --- Solution structure -----------------------------------------------------
-# Supports skills/validate-solution-structure. Read-only against `solutions`
-# and `solutioncomponents` - nothing in this section ever creates, updates,
-# or moves a component. Reassigning a component's owning solution isn't even
-# always possible without recreating it (different publishers can't share a
-# component), so this reports drift for a human to act on, the same way
-# Microsoft's own FastTrack Solution Component Validation Tool does - see
-# skills/validate-solution-structure/references/checks.md for the full
-# reasoning and citation.
+# Supports skills/validate-solution-structure (read-only checks against
+# `solutions`/`solutioncomponents` - reports drift, never creates, updates,
+# or moves a component; reassigning one isn't even always possible without
+# recreating it, since different publishers can't share a component - the
+# same reasoning Microsoft's own FastTrack Solution Component Validation
+# Tool is built on, see skills/validate-solution-structure/references/
+# checks.md) and skills/scaffold-solution-structure (the one place in this
+# module that's allowed to create a publisher/solution as part of a
+# multi-layer topology, and the one skill in this plugin with a genuine,
+# required `pac` CLI dependency - unpacking a solution into git-trackable
+# source is `pac solution clone`'s own core competency, not something this
+# module reimplements via raw REST).
+#
+# Get-DataverseSolutionLayout / Test-DataverseLayoutDependencyCycle are
+# shared by both skills' scripts, so the layout file's shape-validation and
+# cycle-detection logic exists exactly once, not duplicated per script.
 
 $script:SolutionComponentTypeNames = @{
     # Sourced from Microsoft's own solutioncomponent table/entity reference
@@ -1984,8 +2029,7 @@ function Get-DataverseSolutionComponents {
         # same kind of "partially-optional external shape" this function
         # needs to tolerate, even though the rest of this module keeps
         # strict mode on for its own code.
-        $nextLinkProp = $response.psobject.Properties['@odata.nextLink']
-        $nextLink = if ($nextLinkProp) { $nextLinkProp.Value } else { $null }
+        $nextLink = Get-DataverseOptionalValue $response '@odata.nextLink'
         if ($nextLink) {
             $prefix = "$($script:DataverseContext.ApiUrl)/"
             if ($nextLink.StartsWith($prefix)) {
@@ -1998,6 +2042,127 @@ function Get-DataverseSolutionComponents {
     }
 
     return $components
+}
+
+function Get-DataverseCustomSolutions {
+    <#
+    .SYNOPSIS
+        Lists custom solutions in the connected environment - for
+        scaffold-solution-structure's discovery step (deciding which
+        already-live solutions map to which layer of a topology).
+    .DESCRIPTION
+        Excludes managed solutions and the literal "Default Solution" -
+        matching `pac solution list`'s own default behavior (system
+        solutions only appear there with --includeSystemSolutions), since
+        neither is ever a real candidate for one of a human's own declared
+        topology layers.
+    #>
+    param()
+    $result = Invoke-DataverseApi -Method Get -Path (
+        "solutions?`$filter=isvisible eq true and ismanaged eq false and uniquename ne 'Default'" +
+        "&`$select=solutionid,uniquename,friendlyname,version" +
+        "&`$expand=publisherid(`$select=uniquename,friendlyname,customizationprefix)"
+    )
+    return $result.value
+}
+
+function Test-DataverseLayoutDependencyCycle {
+    <#
+    .SYNOPSIS
+        Plain DFS cycle check over a solution-layout.json's dependsOn graph -
+        shared by Get-DataverseSolutionLayout so both consuming scripts get
+        the identical check, not two hand-copies that could drift apart.
+    #>
+    param([hashtable] $LayerNames)
+
+    $visited = @{}
+    $inStack = @{}
+
+    function Visit {
+        param([string] $Name, [hashtable] $LayerNames, [hashtable] $Visited, [hashtable] $InStack)
+        if ($InStack[$Name]) { return $Name }
+        if ($Visited[$Name]) { return $null }
+        $Visited[$Name] = $true
+        $InStack[$Name] = $true
+        foreach ($dep in (Get-DataverseOptionalArray $LayerNames[$Name] 'dependsOn')) {
+            $cycleAt = Visit -Name $dep -LayerNames $LayerNames -Visited $Visited -InStack $InStack
+            if ($cycleAt) { return $cycleAt }
+        }
+        $InStack[$Name] = $false
+        return $null
+    }
+
+    foreach ($name in $LayerNames.Keys) {
+        $cycleAt = Visit -Name $name -LayerNames $LayerNames -Visited $visited -InStack $inStack
+        if ($cycleAt) { return $cycleAt }
+    }
+    return $null
+}
+
+function Get-DataverseSolutionLayout {
+    <#
+    .SYNOPSIS
+        Reads and validates a solution-layout.json topology file (see
+        skills/validate-solution-structure/references/solution-layout-format.md) -
+        shared by validate-solution-structure and scaffold-solution-structure
+        so the shape-validation and cycle-detection logic exists exactly
+        once, not duplicated per script.
+    .DESCRIPTION
+        Throws a specific, actionable message on any shape problem -
+        required fields, unique layer names, dependsOn names all resolving,
+        no dependency cycle - before either skill's script ever makes an
+        API call. Deliberately does not require publisherFriendlyName/
+        publisherPrefix even though publisherUniqueName is required: those
+        two are only needed when the publisher doesn't already exist live,
+        which is scaffold-solution-structure's concern to check, not this
+        shared shape-validation step's.
+    .OUTPUTS
+        [pscustomobject] @{ Layout; LayerNames }. Layout is the parsed JSON
+        object as-is; LayerNames is a hashtable of layer name -> layer
+        object, for callers that need to look layers up by name (e.g.
+        resolving dependsOn, or matching a discovered live solution back to
+        its declared layer).
+    #>
+    param([Parameter(Mandatory)] [string] $LayoutPath)
+
+    if (-not (Test-Path $LayoutPath)) {
+        throw "Solution layout file not found: $LayoutPath. See skills/validate-solution-structure/references/solution-layout-format.md for the expected shape."
+    }
+
+    $layout = Get-Content -Path $LayoutPath -Raw | ConvertFrom-Json -Depth 10
+
+    if (-not (Get-DataverseOptionalValue $layout 'publisherUniqueName')) {
+        throw "Layout is missing required top-level 'publisherUniqueName'. Every layer's solution is expected to share this publisher."
+    }
+    $layers = Get-DataverseOptionalArray $layout 'layers'
+    if ($layers.Count -eq 0) {
+        throw "Layout has no 'layers' - nothing to do."
+    }
+
+    $layerNames = @{}
+    foreach ($layer in $layers) {
+        $name = Get-DataverseOptionalValue $layer 'name'
+        if (-not $name) { throw "A layer is missing required 'name'." }
+        if ($layerNames.ContainsKey($name)) { throw "Layer name '$name' is declared more than once - names must be unique within one layout file." }
+        if (-not (Get-DataverseOptionalValue $layer 'solutionUniqueName')) { throw "Layer '$name' is missing required 'solutionUniqueName'." }
+        $layerNames[$name] = $layer
+    }
+
+    foreach ($layer in $layers) {
+        $name = Get-DataverseOptionalValue $layer 'name'
+        foreach ($dep in (Get-DataverseOptionalArray $layer 'dependsOn')) {
+            if (-not $layerNames.ContainsKey($dep)) {
+                throw "Layer '$name' declares dependsOn '$dep', which doesn't match any layer's 'name' in this file."
+            }
+        }
+    }
+
+    $cycleAt = Test-DataverseLayoutDependencyCycle -LayerNames $layerNames
+    if ($cycleAt) {
+        throw "Layout's dependsOn graph has a cycle involving layer '$cycleAt'. Fix the declared dependencies before running this against a live environment."
+    }
+
+    return [pscustomobject]@{ Layout = $layout; LayerNames = $layerNames }
 }
 
 Export-ModuleMember -Function *
