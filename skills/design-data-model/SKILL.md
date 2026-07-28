@@ -7,13 +7,15 @@ model: opus
 
 Read-only against Dataverse. This skill never creates, modifies, or deletes anything — it produces a written spec that a human approves and `deploy-dataverse-schema` later executes. Never skip straight to creating tables because the conversation feels far enough along; the spec file and the human's explicit approval are the only handoff to the deploy skill.
 
+**Every single Dataverse Web API call anywhere in this workflow — the initial access check, the publisher lookup, table discovery, every later re-query — goes through `Connect-Dataverse` (once) and `Invoke-DataverseApi` in `../deploy-dataverse-schema/scripts/Dataverse.psm1`. Never hand-roll `curl` / `az account get-access-token` / `python3` (or any other ad hoc HTTP client) for any of these calls, not even a single one-off "just checking" query.** That module is the one place this project's auth-provider chain lives (PAC CLI's own cache → client secret → Azure CLI → device code, itself cached and silently refreshed across runs) and where header/error handling is already correct — bypassing it for even one query loses all of that and reintroduces exactly the kind of raw, confusing failure this project's engineering discipline exists to prevent (e.g. a stray `az` stderr line merged into a captured token variable producing an invalid Bearer header, or a `curl -o` output path not resolving the way a later read step expects it to). If a query this skill needs doesn't have a dedicated helper yet, call `Invoke-DataverseApi -Method Get -Path '<path>'` directly — it's generic enough for arbitrary reads — rather than reaching for a shell HTTP client.
+
 ## Workflow
 
 ### 1. Resolve the environment and verify access
 
-Ask for the Dataverse environment URL if not already known. Verify read access by calling `GET {url}/api/data/v9.2/EntityDefinitions?$top=1` (via `Connect-Dataverse`/`Get-DataverseToken` in `../deploy-dataverse-schema/scripts/Dataverse.psm1`, which resolves a token via PAC CLI's cache, client secret, Azure CLI, or a device-code sign-in that's cached and reused after the first time — this skill only ever calls `Connect-Dataverse` and read (`GET`) paths from that module, never anything that creates or modifies).
+Ask for the Dataverse environment URL if not already known. Verify read access with `Invoke-DataverseApi -Method Get -Path 'EntityDefinitions?$top=1'` after `Connect-Dataverse` (see the rule above — this applies starting here, not just for this one call).
 
-Also resolve and record the **publisher** already in use in this environment (unique name, prefix, display name) via `GET .../publishers`. Every schema name proposed later uses this exact prefix — never invent one, and flag it clearly if more than one custom publisher exists, since that's the kind of ambiguity that caused real casing/naming mistakes in the project this plugin was generalized from (a `TT_DEV` vs `TT_Dev` mismatch cost real time to find and fix).
+Also resolve and record the **publisher** already in use in this environment (unique name, prefix, display name) via `Invoke-DataverseApi -Method Get -Path 'publishers?...'`. Every schema name proposed later uses this exact prefix — never invent one, and flag it clearly if more than one custom publisher exists, since that's the kind of ambiguity that caused real casing/naming mistakes in the project this plugin was generalized from (a `TT_DEV` vs `TT_Dev` mismatch cost real time to find and fix).
 
 ### 2. Gather requirements
 
@@ -21,7 +23,7 @@ Ask what the user is building and what data it needs to hold. Don't ask about im
 
 ### 3. Discover existing tables
 
-Query `EntityDefinitions` for custom tables already in the environment (`$filter=IsCustomEntity eq true`), plus check whether any of the standard tables relevant to the requirements already fit (`contact`, `account`, `systemuser`, `team`) — see `references/reuse-extend-create.md`.
+Query `EntityDefinitions` for custom tables already in the environment (`Invoke-DataverseApi -Method Get -Path "EntityDefinitions?`$filter=IsCustomEntity eq true"`), plus check whether any of the standard tables relevant to the requirements already fit (`contact`, `account`, `systemuser`, `team`) — see `references/reuse-extend-create.md`.
 
 ### 4. Score each proposed entity: Reuse, Extend, or Create
 
