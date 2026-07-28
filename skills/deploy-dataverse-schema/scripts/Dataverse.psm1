@@ -823,6 +823,94 @@ function Test-DataverseColumnDrift {
     }
 }
 
+# --- Publisher & solution ---------------------------------------------------------
+# A brand-new Dataverse environment has no custom publisher and no solution
+# matching a fresh spec's -SolutionUniqueName at all - every other create
+# function in this module requires one to already exist, so without this
+# section the very first deploy to a new environment fails outright with
+# "solution unique name is not valid" before a single table is created.
+# Deliberately opt-in at the Deploy-DataverseSchema.ps1 level (only runs
+# when the spec declares publisherUniqueName) - a spec targeting a solution
+# that's already known to exist doesn't need this step at all, and this
+# module shouldn't assume it should create a publisher just because one
+# happens to be missing (that absence might mean a typo in the spec, not
+# "please create it").
+
+function Test-DataversePublisher {
+    param([Parameter(Mandatory)] [string] $UniqueName)
+    $result = Invoke-DataverseApi -Method Get -Path "publishers?`$filter=uniquename eq '$UniqueName'&`$select=publisherid" -SuppressNotFoundError
+    return -not (Test-DataverseNotFound $result)
+}
+
+function New-DataversePublisher {
+    <#
+    .SYNOPSIS
+        Idempotent publisher creation.
+    .DESCRIPTION
+        Not solution-targeted via -SolutionUniqueName - a publisher isn't
+        itself a solution component addressable that way, it's the thing a
+        solution's own creation refers to next (see New-DataverseSolution).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $UniqueName,
+        [Parameter(Mandatory)] [string] $FriendlyName,
+        [Parameter(Mandatory)] [string] $Prefix,
+        [int] $OptionValuePrefix = 10000,
+        [int] $LanguageCode = 1033
+    )
+
+    if (Test-DataversePublisher -UniqueName $UniqueName) {
+        Write-Host "  skip   publisher $UniqueName"
+        return (Invoke-DataverseApi -Method Get -Path "publishers?`$filter=uniquename eq '$UniqueName'&`$select=publisherid").value[0].publisherid
+    }
+
+    $body = @{
+        uniquename                     = $UniqueName
+        friendlyname                   = $FriendlyName
+        customizationprefix            = $Prefix
+        customizationoptionvalueprefix = $OptionValuePrefix
+    }
+    Invoke-DataverseApi -Method Post -Path 'publishers' -Body $body | Out-Null
+    Write-Host "  create publisher $UniqueName (prefix: $Prefix)"
+    return (Invoke-DataverseApi -Method Get -Path "publishers?`$filter=uniquename eq '$UniqueName'&`$select=publisherid").value[0].publisherid
+}
+
+function New-DataverseSolution {
+    <#
+    .SYNOPSIS
+        Idempotent solution creation under a given publisher - the step
+        that makes every other function's -SolutionUniqueName parameter
+        actually resolve to something real on a brand-new environment.
+    .DESCRIPTION
+        Reuses Get-DataverseSolutionByUniqueName (also used by
+        validate-solution-structure) for the existence check, rather than a
+        second, separately-written solutions query - one lookup function
+        for "does this solution exist," not two slightly different ones.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $UniqueName,
+        [Parameter(Mandatory)] [string] $FriendlyName,
+        [Parameter(Mandatory)] [guid] $PublisherId,
+        [string] $Version = '1.0.0.0'
+    )
+
+    if (Get-DataverseSolutionByUniqueName -UniqueName $UniqueName) {
+        Write-Host "  skip   solution $UniqueName"
+        return
+    }
+
+    $body = @{
+        uniquename               = $UniqueName
+        friendlyname             = $FriendlyName
+        version                  = $Version
+        'publisherid@odata.bind' = "/publishers($PublisherId)"
+    }
+    Invoke-DataverseApi -Method Post -Path 'solutions' -Body $body | Out-Null
+    Write-Host "  create solution $UniqueName"
+}
+
 # --- Global choices -------------------------------------------------------------
 
 function Test-DataverseGlobalChoice {
@@ -1651,23 +1739,63 @@ function Show-DataverseWhatIfPlan {
     #>
     param([Parameter(Mandatory)] $Spec)
 
+    # $Spec (and every table/view/etc. within it) is the same
+    # partially-optional external JSON shape Deploy-DataverseSchema.ps1
+    # itself reads - that script disables Set-StrictMode entirely for
+    # exactly this reason (an omitted optional array key, e.g. a table with
+    # no lookups, is a legitimate "none", not a typo). This function can't
+    # do the same, since it lives in this module alongside code that *does*
+    # want strict mode - so instead every optional array property is read
+    # through this helper, which returns @() for "absent" rather than
+    # letting a bare dot-access throw "property cannot be found". This is
+    # the exact bug once already hit in Deploy-DataverseSchema.ps1 itself,
+    # reintroduced here on first real use against a table with no lookups
+    # in a live deploy - fixed here the same way, not by disabling strict
+    # mode module-wide.
+    function Get-SpecArray {
+        param($Object, [string] $Name)
+        $prop = $Object.PSObject.Properties[$Name]
+        if (-not $prop -or $null -eq $prop.Value) { return @() }
+        return @($prop.Value)
+    }
+    # Same reasoning as Get-SpecArray, for a scalar optional property
+    # instead of an array one - publisherUniqueName/publisherPrefix are
+    # genuinely absent on any spec not opting into publisher/solution
+    # auto-creation, not just empty.
+    function Get-SpecValue {
+        param($Object, [string] $Name)
+        $prop = $Object.PSObject.Properties[$Name]
+        if (-not $prop) { return $null }
+        return $prop.Value
+    }
+
+    Write-Host "== What if: publisher & solution =="
+    $publisherUniqueName = Get-SpecValue $Spec 'publisherUniqueName'
+    if ($publisherUniqueName) {
+        if (Test-DataversePublisher -UniqueName $publisherUniqueName) { Write-Host "  skip   publisher $publisherUniqueName" }
+        else { Write-Host "  create publisher $publisherUniqueName (prefix: $(Get-SpecValue $Spec 'publisherPrefix'))" }
+    }
+    if (Get-DataverseSolutionByUniqueName -UniqueName $Spec.solutionUniqueName) { Write-Host "  skip   solution $($Spec.solutionUniqueName)" }
+    else { Write-Host "  create solution $($Spec.solutionUniqueName)" }
+
+    Write-Host ""
     Write-Host "== What if: global choices =="
-    foreach ($choice in $Spec.globalChoices) {
+    foreach ($choice in (Get-SpecArray $Spec 'globalChoices')) {
         if (Test-DataverseGlobalChoice -Name $choice.name) { Write-Host "  skip   global choice $($choice.name)" }
         else { Write-Host "  create global choice $($choice.name) ($($choice.options.Count) options)" }
     }
 
     Write-Host ""
     Write-Host "== What if: tables =="
-    foreach ($table in $Spec.tables) {
+    foreach ($table in (Get-SpecArray $Spec 'tables')) {
         if (Test-DataverseTable -LogicalName $table.logicalName) { Write-Host "  skip   table $($table.logicalName)" }
         else { Write-Host "  create table $($table.logicalName)" }
     }
 
     Write-Host ""
     Write-Host "== What if: columns =="
-    foreach ($table in $Spec.tables) {
-        foreach ($column in $table.columns) {
+    foreach ($table in (Get-SpecArray $Spec 'tables')) {
+        foreach ($column in (Get-SpecArray $table 'columns')) {
             $attributeLogicalName = $column.schemaName.ToLowerInvariant()
             if (Test-DataverseColumn -EntityLogicalName $table.logicalName -AttributeLogicalName $attributeLogicalName) {
                 Write-Host "  skip   $($table.logicalName).$attributeLogicalName"
@@ -1680,8 +1808,8 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: relationships =="
-    foreach ($table in $Spec.tables) {
-        foreach ($lookup in $table.lookups) {
+    foreach ($table in (Get-SpecArray $Spec 'tables')) {
+        foreach ($lookup in (Get-SpecArray $table 'lookups')) {
             if (Test-DataverseRelationship -SchemaName $lookup.relationshipSchemaName) {
                 Write-Host "  skip   relationship $($lookup.relationshipSchemaName)"
             }
@@ -1693,8 +1821,8 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: alternate keys =="
-    foreach ($table in $Spec.tables) {
-        foreach ($key in $table.alternateKeys) {
+    foreach ($table in (Get-SpecArray $Spec 'tables')) {
+        foreach ($key in (Get-SpecArray $table 'alternateKeys')) {
             if (Test-DataverseAlternateKey -EntityLogicalName $table.logicalName -KeySchemaName $key.schemaName) {
                 Write-Host "  skip   alternate key $($table.logicalName).$($key.schemaName)"
             }
@@ -1706,8 +1834,8 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: views =="
-    foreach ($view in $Spec.views) {
-        $table = $Spec.tables | Where-Object { $_.logicalName -eq $view.entityLogicalName } | Select-Object -First 1
+    foreach ($view in (Get-SpecArray $Spec 'views')) {
+        $table = (Get-SpecArray $Spec 'tables') | Where-Object { $_.logicalName -eq $view.entityLogicalName } | Select-Object -First 1
         $pluralDisplayName = if ($table) { $table.pluralDisplayName } else { $view.entityLogicalName }
 
         if (Test-DataverseAutoGeneratedViewCollision -PluralDisplayName $pluralDisplayName -ProposedName $view.name) {
@@ -1724,7 +1852,7 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: security roles =="
-    foreach ($role in $Spec.securityRoles) {
+    foreach ($role in (Get-SpecArray $Spec 'securityRoles')) {
         $existing = Invoke-DataverseApi -Method Get -Path "roles?`$filter=name eq '$($role.name)'&`$select=roleid" -SuppressNotFoundError
         if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   security role $($role.name)" }
         else { Write-Host "  create security role $($role.name) (existence only - privilege-level diffing not previewed)" }
@@ -1732,7 +1860,7 @@ function Show-DataverseWhatIfPlan {
 
     Write-Host ""
     Write-Host "== What if: field security =="
-    foreach ($profile in $Spec.fieldSecurityProfiles) {
+    foreach ($profile in (Get-SpecArray $Spec 'fieldSecurityProfiles')) {
         $existing = Invoke-DataverseApi -Method Get -Path "fieldsecurityprofiles?`$filter=name eq '$($profile.name)'&`$select=fieldsecurityprofileid" -SuppressNotFoundError
         if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   field security profile $($profile.name) (permission-level diffing not previewed)" }
         else { Write-Host "  create field security profile $($profile.name) (permission-level diffing not previewed)" }

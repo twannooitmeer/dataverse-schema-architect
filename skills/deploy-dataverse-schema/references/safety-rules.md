@@ -2,6 +2,12 @@
 
 Every rule here traces back to something that actually broke while building the reference implementation this plugin generalizes from, not a hypothetical. Two of the highest-value ones are also enforced by hooks in this plugin (`../../hooks/`), not just documented here — see `hooks/hooks.json`.
 
+## Publisher/solution auto-creation is opt-in, never assumed
+
+`Deploy-DataverseSchema.ps1` only creates a publisher or solution when the spec explicitly declares `publisherUniqueName` (with `publisherFriendlyName` and `publisherPrefix` required alongside it) — see `spec-format.md`. Without those fields, a missing solution still fails outright with Dataverse's own "solution unique name is not valid," exactly as before this existed.
+
+**Why:** a first deploy to a genuinely brand-new environment (no custom publisher, no solution) used to fail before a single table could be created — there was no code path to create either. But auto-creating a publisher/solution just because the target doesn't exist is also the wrong default for the far more common case: a typo'd `solutionUniqueName` against an environment that already has the *real* one under a different name. Silently creating a second, wrong solution there would be worse than the original failure. Requiring an explicit, deliberate declaration (three fields, not inferred from the solution name alone) means auto-creation only ever happens when a human — or `design-data-model`, prompted by a genuinely empty environment — actually decided it should.
+
 ## Solution targeting is mandatory on every create call
 
 Every `New-Dataverse*` / `Add-Dataverse*` function in `Dataverse.psm1` requires `-SolutionUniqueName` and sends it as the `MSCRM.SolutionUniqueName` request header. There is no code path that creates something without it.

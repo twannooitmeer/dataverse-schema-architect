@@ -74,6 +74,16 @@ if (-not $spec.solutionUniqueName) {
     throw "Spec is missing required top-level 'solutionUniqueName'. Every create call in this run needs a target solution - see references/spec-format.md."
 }
 
+# publisherUniqueName is optional - a spec targeting a solution that's
+# already known to exist doesn't need it, and omitting it keeps every spec
+# written before this feature existed working unchanged. Declaring it opts
+# into auto-creating the publisher and solution if either is missing (a
+# brand-new environment) - see New-DataversePublisher/New-DataverseSolution
+# in Dataverse.psm1.
+if ($spec.publisherUniqueName -and (-not $spec.publisherFriendlyName -or -not $spec.publisherPrefix)) {
+    throw "Spec declares 'publisherUniqueName' but is missing 'publisherFriendlyName' and/or 'publisherPrefix' - all three are required together, or omit publisherUniqueName entirely to assume the publisher and solution already exist. See references/spec-format.md."
+}
+
 $validOwnership = @('UserOwned', 'OrganizationOwned')
 $validColumnTypes = @('String', 'Memo', 'Integer', 'Decimal', 'Money', 'DateOnly', 'DateTime', 'Image', 'File', 'Boolean', 'Choice')
 $validCascades = @('Referential', 'ReferentialRestrictDelete', 'Parental')
@@ -118,6 +128,20 @@ if ($WhatIfPreference) {
     Write-Host "== What if: nothing was created, updated, or deleted =="
     Write-Host "Re-run without -WhatIf to actually deploy."
     return
+}
+
+# --- 0. Publisher & solution --------------------------------------------------------
+# Opt-in: only runs when the spec declares publisherUniqueName (validated
+# above). A spec targeting an already-existing solution doesn't need this
+# step, and its absence is exactly how every spec written before this
+# feature existed keeps working unchanged.
+
+if ($spec.publisherUniqueName) {
+    Write-Host "== Publisher & solution =="
+    $publisherId = New-DataversePublisher -UniqueName $spec.publisherUniqueName -FriendlyName $spec.publisherFriendlyName -Prefix $spec.publisherPrefix
+    $solutionFriendlyName = if ($spec.solutionFriendlyName) { $spec.solutionFriendlyName } else { $spec.solutionUniqueName }
+    New-DataverseSolution -UniqueName $spec.solutionUniqueName -FriendlyName $solutionFriendlyName -PublisherId $publisherId
+    Write-Host ""
 }
 
 # --- 1. Global choices ----------------------------------------------------------

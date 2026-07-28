@@ -24,7 +24,9 @@ This skill executes an **already-approved** spec file. It never designs anything
 
 The script validates the spec's shape before making any API call (required fields, valid enum values for ownership/column types/cascade names) and fails fast with a specific message rather than partway through a partially-applied deploy.
 
-Processing order is fixed regardless of the spec file's own array ordering — see `references/spec-format.md` for exactly why: global choices → tables → columns → relationships → alternate keys → views → security roles → field security. Every step is create-if-missing, so re-running the same spec after fixing one failure is always safe — nothing gets recreated, and the run picks up wherever it left off.
+Processing order is fixed regardless of the spec file's own array ordering — see `references/spec-format.md` for exactly why: publisher & solution (only if the spec declares `publisherUniqueName` — see below) → global choices → tables → columns → relationships → alternate keys → views → security roles → field security. Every step is create-if-missing, so re-running the same spec after fixing one failure is always safe — nothing gets recreated, and the run picks up wherever it left off.
+
+**A spec can declare `publisherUniqueName`/`publisherFriendlyName`/`publisherPrefix` (all three, or none) to opt into automatic publisher and solution creation** — the case a brand-new environment needs, where neither exists yet. Omitting all three (the default, and what every spec written before this existed already does) assumes the publisher and solution already exist, exactly as before.
 
 ## Reading the output
 

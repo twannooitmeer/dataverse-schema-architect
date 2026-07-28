@@ -17,6 +17,8 @@ Ask for the Dataverse environment URL if not already known. Verify read access w
 
 Also resolve and record the **publisher** already in use in this environment (unique name, prefix, display name) via `Invoke-DataverseApi -Method Get -Path 'publishers?...'`. Every schema name proposed later uses this exact prefix — never invent one, and flag it clearly if more than one custom publisher exists, since that's the kind of ambiguity that caused real casing/naming mistakes in the project this plugin was generalized from (a `TT_DEV` vs `TT_Dev` mismatch cost real time to find and fix).
 
+**If no custom publisher exists at all** (a brand-new environment), don't fail or ask the human to go create one manually first. Ask what publisher unique name, display name, and prefix they want, and write `publisherUniqueName`/`publisherFriendlyName`/`publisherPrefix` (plus `solutionFriendlyName` if the solution doesn't exist yet either) into the spec — see `../deploy-dataverse-schema/references/spec-format.md`. This lets `deploy-dataverse-schema` create both automatically rather than the deploy failing outright on the first table with "solution unique name is not valid," which is what happens if these fields are silently left out of a spec for an environment that genuinely has neither yet.
+
 ### 2. Gather requirements
 
 Ask what the user is building and what data it needs to hold. Don't ask about implementation details (choice values, cascade behavior) yet — that comes after entities are identified.

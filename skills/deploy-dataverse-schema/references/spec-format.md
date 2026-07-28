@@ -5,6 +5,9 @@ The JSON file `design-data-model` writes and `deploy-dataverse-schema` reads. On
 ```json
 {
   "solutionUniqueName": "TTSchema",
+  "solutionFriendlyName": "TT Schema",
+  "publisherUniqueName": "ttdev",
+  "publisherFriendlyName": "Tacstone Technology B.V.",
   "publisherPrefix": "ttdev",
   "globalChoices": [
     {
@@ -77,6 +80,8 @@ The JSON file `design-data-model` writes and `deploy-dataverse-schema` reads. On
 ## Field notes
 
 - **`solutionUniqueName`** — required at the top level. Every create call in the deploy run targets this solution. There is deliberately no per-table or per-column override; a schema increment belongs to one solution.
+- **`publisherUniqueName` / `publisherFriendlyName` / `publisherPrefix`** — all optional, but required together (specifying one without the others fails validation before any API call). Omit all three when the publisher and `solutionUniqueName`'s solution already exist — this is the default assumption, and the only behavior a spec written before this feature existed ever had. Declare all three to opt into automatic publisher and solution creation, for a first deploy to a brand-new environment that has neither yet — see `New-DataversePublisher`/`New-DataverseSolution` in `Dataverse.psm1`.
+- **`solutionFriendlyName`** — optional, only used when `publisherUniqueName` is also declared and the solution doesn't exist yet. Defaults to `solutionUniqueName` itself if omitted.
 - **`tables[].ownership`** — `UserOwned` or `OrganizationOwned` only, matching Dataverse's own two options for a custom table.
 - **`columns[].type`** — one of `String`, `Memo`, `Integer`, `Decimal`, `Money`, `DateOnly`, `DateTime`, `Image`, `File`, `Boolean`, `Choice`. `Choice` requires exactly one of `globalChoiceName` (recommended default — see `choice-and-column-conventions.md`) or `localOptions` (only when a local picklist was specifically requested for this column). `DateOnly` is for calendar facts (Time Zone Independent); `DateTime` is for genuine moments — when something actually happened (a sync timestamp, an error time) — and uses `UserLocal` behavior. Swapping these is exactly the mistake the project's date convention exists to prevent.
 - **`columns[].localOptions`** — array of `{ value, label }`, same shape and same explicit-sequential-value convention as `globalChoices[].options`. Only used when `type` is `Choice` and `globalChoiceName` is absent; mutually exclusive with `globalChoiceName` on the same column.
@@ -92,6 +97,6 @@ The JSON file `design-data-model` writes and `deploy-dataverse-schema` reads. On
 
 1. Validates the file against this shape (required top-level keys, valid enum values) before making any API call — a malformed spec should fail fast with a clear message, not partway through a deploy.
 2. Connects once (`Connect-Dataverse`), reusing the token for the whole run.
-3. Processes in this fixed order, regardless of array order elsewhere: global choices → tables + their primary attribute → columns → lookups → alternate keys → views → security roles → field security profiles. This mirrors the validated order from the reference implementation (global choices and tables must exist before anything can reference them; alternate keys need their columns to exist; views need their table; security roles need target tables to resolve privilege IDs from).
+3. Processes in this fixed order, regardless of array order elsewhere: publisher & solution (only if `publisherUniqueName` is declared) → global choices → tables + their primary attribute → columns → lookups → alternate keys → views → security roles → field security profiles. This mirrors the validated order from the reference implementation (the publisher and solution must exist before anything can target them; global choices and tables must exist before anything can reference them; alternate keys need their columns to exist; views need their table; security roles need target tables to resolve privilege IDs from).
 4. Every step is create-if-missing — safe to re-run the same spec file after fixing one failure partway through, without recreating what already succeeded. A skipped column that doesn't match the spec's type is flagged with a `drift` warning rather than silently trusted; a skipped or newly-created alternate key is polled to `Active` (or a bounded timeout) rather than assumed usable the instant the create call returns.
 5. Prints a summary at the end: created vs. skipped counts per category, and anything deliberately not handled (see the main SKILL.md's "Not handled yet" section).
