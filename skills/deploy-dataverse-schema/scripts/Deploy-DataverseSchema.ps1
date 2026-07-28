@@ -16,14 +16,36 @@
 .PARAMETER SpecPath
     Path to the schema spec JSON file.
 .PARAMETER EnvironmentUrl
-    Dataverse environment URL, e.g. https://your-org.crm.dynamics.com
+    Dataverse environment URL, e.g. https://your-org.crm.dynamics.com. Optional -
+    if omitted, resolved via Resolve-DataverseEnvironmentUrl (PAC CLI's own
+    `pac auth list` auth cache). Discovery only ever fills in what you didn't
+    say; it never overrides an -EnvironmentUrl you did pass.
+.PARAMETER AllowedEnvironmentUrls
+    Optional allowlist of environment URLs/hosts this run is permitted to
+    target. Same effect as the DATAVERSE_ALLOWED_ENVIRONMENTS environment
+    variable (semicolon-separated); this parameter takes precedence if both
+    are set. Unset by default, which blocks nothing - this is an opt-in
+    prod-safety guard, not a mandatory gate.
+.PARAMETER Force
+    Bypasses the allowlist check entirely. Use when you deliberately intend
+    to deploy outside the configured allowlist.
 .EXAMPLE
     ./Deploy-DataverseSchema.ps1 -SpecPath ./dataverse-schema.json -EnvironmentUrl https://your-org.crm.dynamics.com
+.EXAMPLE
+    ./Deploy-DataverseSchema.ps1 -SpecPath ./dataverse-schema.json
+    # Resolves the target environment from PAC CLI's active auth profile.
+.EXAMPLE
+    ./Deploy-DataverseSchema.ps1 -SpecPath ./dataverse-schema.json -EnvironmentUrl https://your-org.crm.dynamics.com -WhatIf
+    # Prints a create/skip preview against the live environment - see
+    # Show-DataverseWhatIfPlan in Dataverse.psm1 for exactly what is and
+    # isn't previewed. Nothing is created, updated, or deleted.
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)] [string] $SpecPath,
-    [Parameter(Mandatory)] [string] $EnvironmentUrl
+    [string] $EnvironmentUrl,
+    [string[]] $AllowedEnvironmentUrls,
+    [switch] $Force
 )
 
 # Deliberately NOT Set-StrictMode here (unlike Dataverse.psm1, which keeps it
@@ -64,8 +86,15 @@ foreach ($table in $spec.tables) {
         if ($column.type -notin $validColumnTypes) {
             throw "Table '$($table.logicalName)' column '$($column.schemaName)': type must be one of $($validColumnTypes -join ', '), got '$($column.type)'."
         }
-        if ($column.type -eq 'Choice' -and -not $column.globalChoiceName) {
-            throw "Table '$($table.logicalName)' column '$($column.schemaName)': type Choice requires globalChoiceName. There is no local-picklist path in this plugin."
+        if ($column.type -eq 'Choice') {
+            $hasGlobal = [bool]$column.globalChoiceName
+            $hasLocal = $column.localOptions -and @($column.localOptions).Count -gt 0
+            if ($hasGlobal -and $hasLocal) {
+                throw "Table '$($table.logicalName)' column '$($column.schemaName)': type Choice must specify either globalChoiceName or localOptions, not both."
+            }
+            if (-not $hasGlobal -and -not $hasLocal) {
+                throw "Table '$($table.logicalName)' column '$($column.schemaName)': type Choice requires either globalChoiceName (recommended) or localOptions (only when a local picklist was specifically requested)."
+            }
         }
     }
     foreach ($lookup in $table.lookups) {
@@ -78,7 +107,18 @@ foreach ($table in $spec.tables) {
 Write-Host "Spec validated: $($spec.tables.Count) tables, $($spec.globalChoices.Count) global choices, targeting solution '$($spec.solutionUniqueName)'."
 Write-Host ""
 
+$EnvironmentUrl = Resolve-DataverseEnvironmentUrl -EnvironmentUrl $EnvironmentUrl
+Assert-DataverseEnvironmentAllowed -EnvironmentUrl $EnvironmentUrl -AllowedEnvironmentUrls $AllowedEnvironmentUrls -Force:$Force
+
 Connect-Dataverse -EnvironmentUrl $EnvironmentUrl | Out-Null
+
+if ($WhatIfPreference) {
+    Show-DataverseWhatIfPlan -Spec $spec
+    Write-Host ""
+    Write-Host "== What if: nothing was created, updated, or deleted =="
+    Write-Host "Re-run without -WhatIf to actually deploy."
+    return
+}
 
 # --- 1. Global choices ----------------------------------------------------------
 
@@ -137,6 +177,7 @@ foreach ($table in $spec.tables) {
         if ($column.precision) { $params.Precision = $column.precision }
         if ($column.maxSizeInKb) { $params.MaxSizeInKb = $column.maxSizeInKb }
         if ($column.globalChoiceName) { $params.GlobalChoiceName = $column.globalChoiceName }
+        if ($column.localOptions) { $params.LocalOptions = $column.localOptions | ForEach-Object { @{ Value = $_.value; Label = $_.label } } }
 
         Add-DataverseColumn @params
     }

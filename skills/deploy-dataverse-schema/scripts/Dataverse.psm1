@@ -45,6 +45,23 @@
       field permission is created - Dataverse rejects a FieldPermission row
       for a column that isn't marked IsSecured=true, and that flag is not
       set implicitly by creating the column as "secured" in some looser sense.
+    - Get-DataverseToken tries PAC CLI's own token cache (best-effort,
+      UNSUPPORTED - see Get-DataverseTokenFromPacCache), then client secret
+      (CI env vars), then Azure CLI, then device code, in that order - never
+      reordered. Every provider before device code is silent/non-interactive
+      by construction; device code is deliberately last because it's the
+      only one that can require a human at a browser - and even then, only
+      the first time (see the next bullet).
+    - Device-code tokens are cached to disk (DPAPI-protected on Windows) and
+      silently refreshed on later runs via the cached refresh token -
+      Get-DataverseDeviceCodeAccessToken. Without this, every single script
+      run that fell back to device code would force a fresh interactive
+      sign-in, which is exactly the friction the "token reuse" safety rule
+      already exists to avoid for the az CLI path.
+    - A pasted -EnvironmentUrl has no guard against a typo or a copied wrong
+      URL by itself. Assert-DataverseEnvironmentAllowed closes that hole,
+      opt-in via -AllowedEnvironmentUrls/DATAVERSE_ALLOWED_ENVIRONMENTS, so
+      it never changes behavior for a caller who hasn't configured one.
 #>
 
 Set-StrictMode -Version Latest
@@ -60,11 +77,12 @@ function Connect-Dataverse {
         Authenticates against a Dataverse environment and returns a context
         object used by every other function in this module.
     .DESCRIPTION
-        Tries `az account get-access-token` first - this reuses an existing
-        Azure CLI login with no extra sign-in step, the same pattern
-        Microsoft's own power-platform-skills plugins use. Falls back to a
-        device-code flow only if az CLI isn't installed or isn't logged in,
-        so the plugin still works for someone without Azure CLI set up.
+        Delegates provider selection to Get-DataverseToken - see that
+        function for the priority order. The context records which provider
+        actually supplied the token (AuthMethod) so Invoke-DataverseApi's
+        401 retry knows whether a silent re-call of Get-DataverseToken can
+        resolve it, or whether that would require a fresh interactive
+        sign-in it shouldn't attempt unattended.
     #>
     [CmdletBinding()]
     param(
@@ -72,45 +90,267 @@ function Connect-Dataverse {
     )
 
     $EnvironmentUrl = $EnvironmentUrl.TrimEnd('/')
-    $token = $null
-
-    $az = Get-Command az -ErrorAction SilentlyContinue
-    if ($az) {
-        try {
-            $token = (az account get-access-token --resource $EnvironmentUrl --query accessToken -o tsv 2>$null)
-            if ([string]::IsNullOrWhiteSpace($token)) { $token = $null }
-        }
-        catch {
-            $token = $null
-        }
-    }
-
-    if (-not $token) {
-        Write-Host "Azure CLI token not available - falling back to device-code sign-in."
-        Write-Host "(Install/login Azure CLI with 'az login' to skip this step next time.)"
-        $token = Get-DeviceCodeToken -EnvironmentUrl $EnvironmentUrl
-    }
+    $result = Get-DataverseToken -EnvironmentUrl $EnvironmentUrl
 
     $script:DataverseContext = [pscustomobject]@{
         EnvironmentUrl = $EnvironmentUrl
         ApiUrl         = "$EnvironmentUrl/api/data/v9.2"
-        Token          = $token
-        UsingAzCli     = [bool]$az -and $token
+        Token          = $result.Token
+        AuthMethod     = $result.Method
     }
 
     return $script:DataverseContext
 }
 
+function Get-DataverseToken {
+    <#
+    .SYNOPSIS
+        Resolves an access token for $EnvironmentUrl from the first
+        available provider, in order: PAC CLI's own cache (best-effort,
+        unsupported) -> client secret (CI) -> Azure CLI -> device code.
+    .DESCRIPTION
+        PAC CLI's cache is tried first specifically because this module
+        already assumes PAC CLI is in place (it's used for environment
+        discovery - see Get-DataverseEnvironmentsFromPac) and, when it
+        works, it's the only provider here that requires precisely nothing
+        new: no separate az login, no app registration, no interactive
+        prompt, just reading a session the user already has. It is NOT an
+        officially supported mechanism - see
+        Get-DataverseTokenFromPacCache's own remarks - and every failure
+        mode there returns $null rather than throwing, so this is purely
+        additive: nothing below it changes if it stops working.
+
+        Client secret comes next specifically because its presence - all
+        three of DATAVERSE_TENANT_ID/DATAVERSE_CLIENT_ID/
+        DATAVERSE_CLIENT_SECRET set - is itself the explicit, deliberate
+        signal of "this is unattended/CI, do not attempt anything
+        interactive." Azure CLI or a lingering device-code session being
+        also present on a CI box is coincidental, not intent, so it must not
+        take priority over an explicit configuration. Azure CLI comes next
+        because it reuses an existing login with no extra sign-in step -
+        the same pattern Microsoft's own power-platform-skills plugins use.
+        Device code is the last resort: the only provider that can require a
+        human present at a browser, and even then only the first time - see
+        Get-DataverseDeviceCodeAccessToken for the persistent cache/refresh
+        that avoids repeating that on every later run.
+    .OUTPUTS
+        [pscustomobject] @{ Token; Method }. Method is one of 'PacCache',
+        'ClientSecret', 'AzCli', 'DeviceCodeCached', 'DeviceCodeInteractive'
+        - callers deciding whether a 401 can be silently retried should
+        treat only DeviceCodeInteractive as requiring a fresh interactive
+        sign-in; every other value was obtained without one.
+    #>
+    param([Parameter(Mandatory)] [string] $EnvironmentUrl)
+
+    $pacCacheToken = Get-DataverseTokenFromPacCache -EnvironmentUrl $EnvironmentUrl
+    if ($pacCacheToken) {
+        return [pscustomobject]@{ Token = $pacCacheToken; Method = 'PacCache' }
+    }
+
+    if ($env:DATAVERSE_TENANT_ID -and $env:DATAVERSE_CLIENT_ID -and $env:DATAVERSE_CLIENT_SECRET) {
+        $token = Get-ClientSecretToken -EnvironmentUrl $EnvironmentUrl `
+            -TenantId $env:DATAVERSE_TENANT_ID -ClientId $env:DATAVERSE_CLIENT_ID -ClientSecret $env:DATAVERSE_CLIENT_SECRET
+        return [pscustomobject]@{ Token = $token; Method = 'ClientSecret' }
+    }
+
+    $az = Get-Command az -ErrorAction SilentlyContinue
+    if ($az) {
+        try {
+            $token = (az account get-access-token --resource $EnvironmentUrl --query accessToken -o tsv 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($token)) {
+                return [pscustomobject]@{ Token = $token; Method = 'AzCli' }
+            }
+        }
+        catch {
+            # Fall through to device code below.
+        }
+    }
+
+    Write-Host "No PAC CLI cache, client-secret env vars, or Azure CLI token available - falling back to device-code sign-in."
+    Write-Host "(Install/login Azure CLI with 'az login' to skip this step next time, or set DATAVERSE_TENANT_ID/DATAVERSE_CLIENT_ID/DATAVERSE_CLIENT_SECRET for unattended use.)"
+    return Get-DataverseDeviceCodeAccessToken -EnvironmentUrl $EnvironmentUrl
+}
+
+function Get-DataverseTokenFromPacCache {
+    <#
+    .SYNOPSIS
+        UNSUPPORTED, best-effort: reads an access token straight out of PAC
+        CLI's own local MSAL token cache, instead of shelling out to `pac`
+        (which has no public command to export one - `pac auth`'s
+        create/list/select/who subcommands only manage which cached profile
+        *other pac commands* use internally, confirmed against Microsoft's
+        own CLI reference - there's nothing like `az account get-access-
+        token`).
+    .DESCRIPTION
+        THIS IS NOT AN OFFICIALLY SUPPORTED MECHANISM AND CAN BREAK ON ANY
+        PAC CLI UPDATE. It reads a private, undocumented on-disk file -
+        %LOCALAPPDATA%\Microsoft\PowerAppsCli\tokencache_msalv3.dat on
+        Windows, confirmed present and DPAPI-protected (its first four bytes
+        match the standard Windows CRYPTPROTECTDATA blob header) on this
+        project's own dev machine - that happens to be how the
+        Microsoft.PowerApps.CLI NuGet tool (the actual package behind the
+        `pac` command) persists its MSAL token cache today. Unprotects it
+        via Windows DPAPI CurrentUser scope: the same OS-level protection
+        the cache was written with, decryptable only by the same Windows
+        user account that wrote it - which is the account this process
+        already runs as. Nothing here decrypts anything this user couldn't
+        already decrypt by just running `pac` itself; it only skips needing
+        `pac` installed or invoked to reuse a session it already created.
+
+        Every failure path returns $null rather than throwing - wrong OS,
+        file missing, DPAPI unprotect failing (a different user account, a
+        future cache format change), JSON in an unexpected shape, or no
+        access-token entry matching this environment's host and still
+        unexpired. Get-DataverseToken treats $null as "try the next
+        provider," so client secret / Azure CLI / device code remain a
+        working fallback chain regardless of whether this one keeps working
+        on a future PAC CLI version. Windows only by construction - DPAPI is
+        a Windows API; other OSes fall through immediately.
+    #>
+    param([Parameter(Mandatory)] [string] $EnvironmentUrl)
+
+    if (-not $IsWindows) { return $null }
+
+    $cachePath = Join-Path $env:LOCALAPPDATA 'Microsoft\PowerAppsCli\tokencache_msalv3.dat'
+    if (-not (Test-Path $cachePath)) { return $null }
+
+    try {
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+        $protectedBytes = [System.IO.File]::ReadAllBytes($cachePath)
+
+        $plainBytes = $null
+        foreach ($scope in @('CurrentUser', 'LocalMachine')) {
+            try {
+                $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                    $protectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::$scope)
+                break
+            }
+            catch {
+                continue
+            }
+        }
+        if (-not $plainBytes) { return $null }
+
+        $cache = [System.Text.Encoding]::UTF8.GetString($plainBytes) | ConvertFrom-Json -ErrorAction Stop
+        if (-not $cache.AccessToken) { return $null }
+
+        $targetHost = ([Uri]$EnvironmentUrl).Host
+        $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+        $candidate = $cache.AccessToken.PSObject.Properties.Value |
+            Where-Object { $_.target -and $_.target -like "*$targetHost*" -and [long]$_.expires_on -gt ($nowEpoch + 60) } |
+            Sort-Object -Property { [long]$_.expires_on } -Descending |
+            Select-Object -First 1
+
+        if (-not $candidate) { return $null }
+        return $candidate.secret
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-ClientSecretToken {
+    <#
+    .SYNOPSIS
+        Client-credentials OAuth flow for unattended/CI use - no interactive
+        sign-in, no Azure CLI dependency.
+    .DESCRIPTION
+        Requires an application user already provisioned for this app
+        registration in the target Dataverse environment - a client secret
+        alone only proves identity to Entra ID; Dataverse itself has to
+        separately recognize the app as a user with a security role before
+        any Web API call succeeds. That provisioning is a one-time
+        Dataverse-side setup step, not something this function does.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $EnvironmentUrl,
+        [Parameter(Mandatory)] [string] $TenantId,
+        [Parameter(Mandatory)] [string] $ClientId,
+        [Parameter(Mandatory)] [string] $ClientSecret
+    )
+
+    $response = Invoke-RestMethod -Method Post `
+        -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
+        -Body @{
+            client_id     = $ClientId
+            client_secret = $ClientSecret
+            scope         = "$EnvironmentUrl/.default"
+            grant_type    = 'client_credentials'
+        }
+    return $response.access_token
+}
+
+function Get-DataverseDeviceCodeAccessToken {
+    <#
+    .SYNOPSIS
+        Device-code auth with a persistent, silent-refresh cache - only ever
+        falls to an actual interactive sign-in when there's no usable cached
+        refresh token for this environment.
+    .DESCRIPTION
+        Without this, every single run of this module that fell back to
+        device code would force a fresh interactive sign-in - the device-
+        code equivalent of never reusing az's own cached login, which the
+        "token reuse" safety rule already exists to avoid on that path. A
+        refresh token from Microsoft's public-client device-code flow is
+        long-lived (weeks, not the access token's ~1 hour), so caching it is
+        the same trade Azure CLI itself makes for its own cached login.
+
+        The cache file is DPAPI-protected on Windows (CurrentUser scope,
+        same mechanism Get-DataverseTokenFromPacCache reads from PAC CLI's
+        own cache) since it holds a real, reusable credential. On
+        non-Windows it's written in plaintext with a loud one-time warning -
+        this module has only been exercised on Windows so far, so that path
+        is informational rather than hardened.
+    .OUTPUTS
+        [pscustomobject] @{ Token; Method }. Method is 'DeviceCodeCached' if
+        no interaction was needed this call (a valid cached access token, or
+        a successful silent refresh), or 'DeviceCodeInteractive' if the user
+        had to complete a fresh device-code sign-in.
+    #>
+    param([Parameter(Mandatory)] [string] $EnvironmentUrl)
+
+    $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $cached = Get-DataverseDeviceTokenCache -EnvironmentUrl $EnvironmentUrl
+
+    if ($cached -and $cached.expires_on -gt ($nowEpoch + 60)) {
+        return [pscustomobject]@{ Token = $cached.access_token; Method = 'DeviceCodeCached' }
+    }
+
+    if ($cached -and $cached.refresh_token) {
+        $refreshed = Get-DataverseDeviceCodeRefreshedToken -EnvironmentUrl $EnvironmentUrl -RefreshToken $cached.refresh_token
+        if ($refreshed) {
+            Save-DataverseDeviceTokenCache -EnvironmentUrl $EnvironmentUrl -AccessToken $refreshed.access_token `
+                -RefreshToken $refreshed.refresh_token -ExpiresOnEpoch $refreshed.expires_on
+            return [pscustomobject]@{ Token = $refreshed.access_token; Method = 'DeviceCodeCached' }
+        }
+        # Refresh token no longer works (revoked, expired past its own
+        # lifetime, tenant policy change) - fall through to a fresh
+        # interactive sign-in below rather than throwing.
+    }
+
+    $tokenResponse = Get-DeviceCodeToken -EnvironmentUrl $EnvironmentUrl
+    Save-DataverseDeviceTokenCache -EnvironmentUrl $EnvironmentUrl -AccessToken $tokenResponse.access_token `
+        -RefreshToken $tokenResponse.refresh_token -ExpiresOnEpoch ($nowEpoch + [long]$tokenResponse.expires_in)
+    return [pscustomobject]@{ Token = $tokenResponse.access_token; Method = 'DeviceCodeInteractive' }
+}
+
 function Get-DeviceCodeToken {
     <#
     .SYNOPSIS
-        Device-code OAuth fallback when Azure CLI isn't available.
+        Device-code OAuth flow when Azure CLI isn't available. Always
+        interactive - callers wanting the cache/refresh behavior should call
+        Get-DataverseDeviceCodeAccessToken instead, which wraps this.
     .DESCRIPTION
         Uses Microsoft's own public-client app registration for interactive
         Dataverse tooling (the same one documented across official Dataverse
         SDK samples). Prints a URL and a code - the person signing in opens
         their own browser and enters it; no credential passes through this
         process.
+    .OUTPUTS
+        The full token response object (access_token, refresh_token,
+        expires_in, ...) - not just the access token string - so the caller
+        can persist the refresh token for later silent reuse.
     #>
     param([Parameter(Mandatory)] [string] $EnvironmentUrl)
 
@@ -139,7 +379,7 @@ function Get-DeviceCodeToken {
                 device_code = $deviceCodeResponse.device_code
             }
             Write-Host "Authenticated."
-            return $tokenResponse.access_token
+            return $tokenResponse
         }
         catch {
             $errorBody = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -149,6 +389,246 @@ function Get-DeviceCodeToken {
     }
 
     throw "Device code sign-in timed out."
+}
+
+function Get-DataverseDeviceCodeRefreshedToken {
+    <#
+    .SYNOPSIS
+        Silently exchanges a cached refresh token for a new access token -
+        the mechanism that lets a device-code session survive across
+        separate runs of this module without a fresh interactive sign-in
+        every time.
+    .DESCRIPTION
+        Returns $null (never throws) on any failure - an expired, revoked,
+        or policy-invalidated refresh token is an expected, recoverable
+        case, not an error: the caller falls back to a fresh interactive
+        device-code sign-in when this returns nothing.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $EnvironmentUrl,
+        [Parameter(Mandatory)] [string] $RefreshToken
+    )
+
+    $clientId = '51f81489-12ee-4a9e-aaae-a2591f45987d'
+    try {
+        $response = Invoke-RestMethod -Method Post `
+            -Uri "https://login.microsoftonline.com/organizations/oauth2/v2.0/token" `
+            -Body @{
+                grant_type    = 'refresh_token'
+                client_id     = $clientId
+                refresh_token = $RefreshToken
+                scope         = "$EnvironmentUrl/.default"
+            }
+        return @{
+            access_token  = $response.access_token
+            refresh_token = if ($response.refresh_token) { $response.refresh_token } else { $RefreshToken }
+            expires_on    = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + [long]$response.expires_in
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-DataverseDeviceTokenCachePath {
+    param([Parameter(Mandatory)] [string] $EnvironmentUrl)
+
+    $targetHost = ([Uri]$EnvironmentUrl).Host
+    $dir = if ($IsWindows) {
+        Join-Path $env:LOCALAPPDATA 'dataverse-schema-architect\device-token-cache'
+    }
+    else {
+        Join-Path $HOME '.dataverse-schema-architect/device-token-cache'
+    }
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    return Join-Path $dir "$targetHost.json"
+}
+
+function Save-DataverseDeviceTokenCache {
+    <#
+    .SYNOPSIS
+        Persists a device-code access + refresh token to disk so a later
+        run of this module can refresh silently instead of prompting for a
+        fresh interactive sign-in every time.
+    .DESCRIPTION
+        DPAPI CurrentUser-protected on Windows before being written to disk
+        - the refresh token this file holds is a real, long-lived
+        credential, not something to leave in plaintext. On non-Windows,
+        written in plaintext with a loud one-time warning.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $EnvironmentUrl,
+        [Parameter(Mandatory)] [string] $AccessToken,
+        [string] $RefreshToken,
+        [Parameter(Mandatory)] [long] $ExpiresOnEpoch
+    )
+
+    $path = Get-DataverseDeviceTokenCachePath -EnvironmentUrl $EnvironmentUrl
+    $payload = @{ access_token = $AccessToken; refresh_token = $RefreshToken; expires_on = $ExpiresOnEpoch } | ConvertTo-Json -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+
+    if ($IsWindows) {
+        Add-Type -AssemblyName System.Security
+        $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+            $bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        [System.IO.File]::WriteAllBytes($path, $protectedBytes)
+    }
+    else {
+        Write-Warning "Storing the device-code refresh token in plaintext at $path - this module's persistent auth cache is only DPAPI-protected on Windows."
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+    }
+}
+
+function Get-DataverseDeviceTokenCache {
+    <#
+    .SYNOPSIS
+        Reads back what Save-DataverseDeviceTokenCache wrote, or $null if
+        there's nothing cached yet, the file is unreadable, or (Windows)
+        DPAPI can't unprotect it - e.g. a different Windows user account.
+        Never throws.
+    #>
+    param([Parameter(Mandatory)] [string] $EnvironmentUrl)
+
+    $path = Get-DataverseDeviceTokenCachePath -EnvironmentUrl $EnvironmentUrl
+    if (-not (Test-Path $path)) { return $null }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        if ($IsWindows) {
+            Add-Type -AssemblyName System.Security
+            $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                $bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            return [System.Text.Encoding]::UTF8.GetString($plainBytes) | ConvertFrom-Json -ErrorAction Stop
+        }
+        return [System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+}
+
+# --- Environment discovery -----------------------------------------------------
+
+function Get-DataverseEnvironmentsFromPac {
+    <#
+    .SYNOPSIS
+        Best-effort discovery of Dataverse environments already known to
+        this machine's PAC CLI auth cache, via `pac auth list --json`.
+    .DESCRIPTION
+        Returns $null - never throws - if `pac` isn't installed, isn't
+        logged into anything, or its --json output doesn't parse cleanly.
+        Discovery is a convenience layered on top of the existing
+        -EnvironmentUrl parameter, never a hard requirement to use this
+        module: nothing here should turn "PAC CLI isn't set up" into a
+        harder failure than just asking for -EnvironmentUrl directly.
+        PAC CLI's own JSON property naming for the org/environment URL has
+        varied across versions - this tries several candidate property
+        names rather than assuming one.
+    #>
+    $pac = Get-Command pac -ErrorAction SilentlyContinue
+    if (-not $pac) { return $null }
+
+    try {
+        $raw = pac auth list --json 2>$null
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        $profiles = $raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+    if (-not $profiles) { return $null }
+
+    $result = foreach ($p in $profiles) {
+        $url = $p.EnvironmentUrl
+        if (-not $url) { $url = $p.Resource }
+        if (-not $url) { $url = $p.Environment }
+        if (-not $url) { continue }
+        [pscustomobject]@{
+            Name           = $p.Name
+            EnvironmentUrl = $url.TrimEnd('/')
+            IsActive       = [bool]$p.Active
+        }
+    }
+    return $result
+}
+
+function Resolve-DataverseEnvironmentUrl {
+    <#
+    .SYNOPSIS
+        Resolves the target environment URL for a deploy: an explicit
+        -EnvironmentUrl always wins; otherwise falls back to whichever
+        single environment PAC CLI's own auth cache reports.
+    .DESCRIPTION
+        Deliberately does not guess when discovery turns up more than one
+        candidate and none is marked active in PAC CLI - environment choice
+        is exactly the kind of mistake this module's allowlist guard
+        (Assert-DataverseEnvironmentAllowed) also exists to catch, so an
+        ambiguous discovery result fails loudly with the candidate list
+        rather than silently picking one.
+    #>
+    param([string] $EnvironmentUrl)
+
+    if ($EnvironmentUrl) { return $EnvironmentUrl.TrimEnd('/') }
+
+    $discovered = Get-DataverseEnvironmentsFromPac
+    if (-not $discovered -or @($discovered).Count -eq 0) {
+        throw "No -EnvironmentUrl given and no environments discoverable via 'pac auth list'. Pass -EnvironmentUrl explicitly, or run 'pac auth create --url <environment-url>' first."
+    }
+    $discovered = @($discovered)
+
+    $active = @($discovered | Where-Object { $_.IsActive })
+    if ($active.Count -eq 1) {
+        Write-Host "No -EnvironmentUrl given - using PAC CLI's active auth profile: $($active[0].EnvironmentUrl) ($($active[0].Name))"
+        return $active[0].EnvironmentUrl
+    }
+    if ($discovered.Count -eq 1) {
+        Write-Host "No -EnvironmentUrl given - using the only environment PAC CLI knows about: $($discovered[0].EnvironmentUrl)"
+        return $discovered[0].EnvironmentUrl
+    }
+
+    $list = ($discovered | ForEach-Object { "  - $($_.EnvironmentUrl) ($($_.Name))" }) -join "`n"
+    throw "No -EnvironmentUrl given and PAC CLI reports $($discovered.Count) environments with none marked active:`n$list`nPass -EnvironmentUrl explicitly to disambiguate."
+}
+
+# --- Environment allowlist / prod guard -----------------------------------------
+
+function Assert-DataverseEnvironmentAllowed {
+    <#
+    .SYNOPSIS
+        Refuses to proceed against an environment URL that doesn't match a
+        configured allowlist, unless explicitly overridden.
+    .DESCRIPTION
+        Opt-in, not a mandatory gate: an unset allowlist blocks nothing, so
+        this is fully backward compatible for anyone deploying to a single
+        environment today. Configure it via -AllowedEnvironmentUrls or the
+        DATAVERSE_ALLOWED_ENVIRONMENTS environment variable (semicolon-
+        separated URLs), matched on host only (scheme/trailing-slash
+        differences don't matter). -Force bypasses the check entirely, for
+        the deliberate "yes, I know, deploy anyway" case - the free-text
+        pasted -EnvironmentUrl this module has always accepted is otherwise
+        a genuine prod-safety hole with no guard against a typo or a copied
+        wrong URL landing real writes in the wrong environment.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $EnvironmentUrl,
+        [string[]] $AllowedEnvironmentUrls,
+        [switch] $Force
+    )
+
+    if ($Force) { return }
+
+    $allowlist = $AllowedEnvironmentUrls
+    if ((-not $allowlist -or $allowlist.Count -eq 0) -and $env:DATAVERSE_ALLOWED_ENVIRONMENTS) {
+        $allowlist = $env:DATAVERSE_ALLOWED_ENVIRONMENTS -split ';' | Where-Object { $_ }
+    }
+    if (-not $allowlist -or $allowlist.Count -eq 0) { return }
+
+    $targetHost = ([Uri]$EnvironmentUrl).Host.ToLowerInvariant()
+    $allowedHosts = $allowlist | ForEach-Object { ([Uri]$_.Trim()).Host.ToLowerInvariant() }
+
+    if ($targetHost -notin $allowedHosts) {
+        throw "Refusing to deploy to '$EnvironmentUrl' - its host does not match the configured allowlist ($($allowedHosts -join ', ')). Pass -Force to override, or add it to -AllowedEnvironmentUrls / DATAVERSE_ALLOWED_ENVIRONMENTS if this is intentional."
+    }
 }
 
 # --- Core REST plumbing --------------------------------------------------------
@@ -206,9 +686,16 @@ function Invoke-DataverseApi {
         if ($status -eq 404 -and $SuppressNotFoundError) {
             return $null
         }
-        if ($status -eq 401 -and $script:DataverseContext.UsingAzCli) {
-            # Token expired mid-run - az's own cache makes a silent refresh
-            # painless, so just re-authenticate and retry once.
+        $silentlyRetryableAuthMethods = @('PacCache', 'ClientSecret', 'AzCli', 'DeviceCodeCached')
+        if ($status -eq 401 -and $script:DataverseContext.AuthMethod -in $silentlyRetryableAuthMethods) {
+            # Token expired mid-run - every method except DeviceCodeInteractive
+            # can re-authenticate without a human present (DeviceCodeCached
+            # included, since Get-DataverseDeviceCodeAccessToken's own cache/
+            # refresh is itself silent), so just re-call Get-DataverseToken
+            # via Connect-Dataverse and retry once. DeviceCodeInteractive is
+            # excluded: retrying it would mean prompting for a fresh
+            # interactive sign-in mid-deploy, which this module never does
+            # on its own.
             Connect-Dataverse -EnvironmentUrl $script:DataverseContext.EnvironmentUrl | Out-Null
             $headers.Authorization = "Bearer $($script:DataverseContext.Token)"
             $params.Headers = $headers
@@ -264,6 +751,65 @@ $script:CascadePresets = @{
     }
 }
 
+# --- Drift detection ------------------------------------------------------------
+# Maps this module's -Type values to Dataverse's own AttributeTypeName.Value
+# strings, confirmed against Microsoft's column-type reference table before
+# writing this (not guessed) - DateOnly and DateTime both map to DateTimeType
+# since Dataverse doesn't distinguish them at this level; the difference is
+# DateTimeBehavior, a separate property Test-DataverseColumnDrift does not
+# compare.
+
+$script:ExpectedAttributeTypeName = @{
+    String   = 'StringType'
+    Memo     = 'MemoType'
+    Integer  = 'IntegerType'
+    Decimal  = 'DecimalType'
+    Money    = 'MoneyType'
+    DateOnly = 'DateTimeType'
+    DateTime = 'DateTimeType'
+    Image    = 'ImageType'
+    File     = 'FileType'
+    Boolean  = 'BooleanType'
+    Choice   = 'PicklistType'
+}
+
+function Test-DataverseColumnDrift {
+    <#
+    .SYNOPSIS
+        Warns (never throws, never blocks) when an existing column's live
+        Dataverse type doesn't match what the spec asks for.
+    .DESCRIPTION
+        Create-if-missing means a wrong-typed existing column is otherwise
+        left silently wrong forever - this module never alters an existing
+        column's type (that's a deliberate migration a human should decide
+        on, not something to do implicitly on a routine re-run), so the most
+        this function can respectably do is surface the mismatch loudly
+        rather than let the "skip" log line look like everything matched.
+        Every failure path (the read call itself failing, an unmapped
+        -Type, a live type this module doesn't recognize) returns quietly
+        rather than raising a false positive - an unverifiable comparison is
+        reported as nothing, not as drift.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $EntityLogicalName,
+        [Parameter(Mandatory)] [string] $AttributeLogicalName,
+        [Parameter(Mandatory)] [string] $ExpectedType
+    )
+
+    $expectedTypeName = $script:ExpectedAttributeTypeName[$ExpectedType]
+    if (-not $expectedTypeName) { return }
+
+    $live = Invoke-DataverseApi -Method Get `
+        -Path "EntityDefinitions(LogicalName='$EntityLogicalName')/Attributes(LogicalName='$AttributeLogicalName')?`$select=AttributeTypeName" `
+        -SuppressNotFoundError
+    if (-not $live -or -not $live.AttributeTypeName -or -not $live.AttributeTypeName.Value) { return }
+
+    $liveTypeName = $live.AttributeTypeName.Value
+    if ($liveTypeName -ne $expectedTypeName) {
+        Write-Warning "  drift  $EntityLogicalName.$AttributeLogicalName - spec asks for -Type $ExpectedType ($expectedTypeName), live column is $liveTypeName. This module never changes an existing column's type; a mismatch needs a deliberate migration, not a silent skip."
+    }
+}
+
 # --- Global choices -------------------------------------------------------------
 
 function Test-DataverseGlobalChoice {
@@ -297,14 +843,15 @@ function New-DataverseGlobalChoice {
     .SYNOPSIS
         Idempotent global choice (option set) creation.
     .DESCRIPTION
-        Every Choice column in this module is backed by a global choice -
-        there is no local-picklist path. Values are supplied explicitly by
-        the caller and must be sequential from 100000000 by this module's own
-        convention (not enforced here, since a caller might legitimately
-        import an existing numbering scheme, but strongly recommended in the
-        design skill: never rely on the publisher's auto-derived value
-        prefix, which produces unpredictable numbers if the choice is ever
-        recreated in a different environment).
+        The recommended path for a Choice column in this module - see
+        Add-DataverseColumn's -LocalOptions for the alternative used only
+        when a local picklist was specifically requested. Values are
+        supplied explicitly by the caller and must be sequential from
+        100000000 by this module's own convention (not enforced here, since
+        a caller might legitimately import an existing numbering scheme, but
+        strongly recommended in the design skill: never rely on the
+        publisher's auto-derived value prefix, which produces unpredictable
+        numbers if the choice is ever recreated in a different environment).
     #>
     [CmdletBinding()]
     param(
@@ -418,14 +965,31 @@ function Add-DataverseColumn {
         Dataverse attribute metadata shape by -Type.
     .PARAMETER Type
         One of: String, Memo, Integer, Decimal, Money, DateOnly, DateTime,
-        Image, File, Boolean, Choice. Choice REQUIRES -GlobalChoiceName -
-        there is no local-picklist option in this module. DateOnly is for
-        calendar facts (Time Zone Independent - the project-wide convention
-        for anything that isn't a real moment in time); DateTime is for
-        genuine moments - when something actually happened - and uses
+        Image, File, Boolean, Choice. Choice requires exactly one of
+        -GlobalChoiceName or -LocalOptions - see those parameters. DateOnly
+        is for calendar facts (Time Zone Independent - the project-wide
+        convention for anything that isn't a real moment in time); DateTime
+        is for genuine moments - when something actually happened - and uses
         UserLocal behavior. Getting these two swapped is exactly the mistake
         the convention exists to prevent: a DateOnly column used for a
         "last synced at" timestamp would silently shift by time zone.
+    .PARAMETER GlobalChoiceName
+        The recommended path for -Type Choice. Backs the column with a
+        reusable global choice (see New-DataverseGlobalChoice) - portable
+        across tables and across environments, since its values are
+        explicit rather than derived from a publisher prefix.
+    .PARAMETER LocalOptions
+        The -Type Choice path for when a local (table-specific) picklist was
+        specifically requested rather than a global choice - e.g. @{ Value =
+        100000000; Label = "Draft" }, @{ Value = 100000001; Label = "Sent" }.
+        Deliberately a separate, differently-named parameter from
+        -GlobalChoiceName rather than a shared "-Options" with a switch: a
+        caller has to name what they're asking for, not flip a flag next to
+        the default path. Still takes explicit sequential values, same as a
+        global choice - a local picklist's values are just as much a
+        cross-environment portability risk if left to the publisher's
+        auto-derived prefix; this parameter does not remove that risk, only
+        the reuse-across-tables benefit a global choice would have given.
     .PARAMETER AutoNumberFormat
         Only meaningful with -Type String. A Dataverse autonumber format
         string, e.g. "QUO-{SEQNUM:5}" -> QUO-00001. See Microsoft's
@@ -452,6 +1016,7 @@ function Add-DataverseColumn {
         [string] $FalseLabel = 'No',
         [bool] $DefaultBooleanValue = $false,
         [string] $GlobalChoiceName,
+        [hashtable[]] $LocalOptions,  # @{ Value = 100000000; Label = "Draft" } - only when a local picklist was specifically requested
         [bool] $Required = $false,
         [Parameter(Mandatory)] [string] $SolutionUniqueName,
         [int] $LanguageCode = 1033
@@ -460,6 +1025,7 @@ function Add-DataverseColumn {
     $attributeLogicalName = $SchemaName.ToLowerInvariant()
     if (Test-DataverseColumn -EntityLogicalName $EntityLogicalName -AttributeLogicalName $attributeLogicalName) {
         Write-Host "  skip   $EntityLogicalName.$attributeLogicalName"
+        Test-DataverseColumnDrift -EntityLogicalName $EntityLogicalName -AttributeLogicalName $attributeLogicalName -ExpectedType $Type
         return
     }
 
@@ -523,13 +1089,34 @@ function Add-DataverseColumn {
                DefaultValue = $DefaultBooleanValue }
         }
         'Choice' {
-            if (-not $GlobalChoiceName) {
-                throw "Add-DataverseColumn -Type Choice requires -GlobalChoiceName. This module has no local-picklist path by design."
+            if ($GlobalChoiceName -and $LocalOptions) {
+                throw "Add-DataverseColumn -Type Choice: pass either -GlobalChoiceName or -LocalOptions, not both."
             }
-            $globalChoiceId = Get-DataverseGlobalChoiceId -Name $GlobalChoiceName
-            @{ '@odata.type' = 'Microsoft.Dynamics.CRM.PicklistAttributeMetadata'; SchemaName = $SchemaName
-               DisplayName = $displayLabel
-               'GlobalOptionSet@odata.bind' = "/GlobalOptionSetDefinitions($globalChoiceId)" }
+            if ($GlobalChoiceName) {
+                $globalChoiceId = Get-DataverseGlobalChoiceId -Name $GlobalChoiceName
+                @{ '@odata.type' = 'Microsoft.Dynamics.CRM.PicklistAttributeMetadata'; SchemaName = $SchemaName
+                   DisplayName = $displayLabel
+                   'GlobalOptionSet@odata.bind' = "/GlobalOptionSetDefinitions($globalChoiceId)" }
+            }
+            elseif ($LocalOptions) {
+                # Local (table-specific) picklist - only reached when a caller
+                # deliberately named -LocalOptions. Still explicit, sequential
+                # values, same reasoning as New-DataverseGlobalChoice: never
+                # the publisher's auto-derived prefix.
+                @{ '@odata.type' = 'Microsoft.Dynamics.CRM.PicklistAttributeMetadata'; SchemaName = $SchemaName
+                   DisplayName = $displayLabel
+                   OptionSet = @{
+                       '@odata.type' = 'Microsoft.Dynamics.CRM.OptionSetMetadata'
+                       IsGlobal      = $false
+                       OptionSetType = 'Picklist'
+                       Options       = $LocalOptions | ForEach-Object {
+                           @{ Value = $_.Value; Label = @{ LocalizedLabels = @(@{ Label = $_.Label; LanguageCode = $LanguageCode }) } }
+                       }
+                   } }
+            }
+            else {
+                throw "Add-DataverseColumn -Type Choice requires either -GlobalChoiceName (recommended - see references/choice-and-column-conventions.md) or -LocalOptions (only when a local picklist was specifically requested for this column)."
+            }
         }
     }
 
@@ -600,11 +1187,71 @@ function Test-DataverseAlternateKey {
     return [bool]($entity.Keys | Where-Object { $_.SchemaName -eq $KeySchemaName })
 }
 
+function Wait-DataverseAlternateKeyActive {
+    <#
+    .SYNOPSIS
+        Polls EntityKeyIndexStatus until the key reaches Active or Failed,
+        or a bounded timeout elapses - closes the gap where "safe to
+        re-run" wasn't yet fully true for alternate keys.
+    .DESCRIPTION
+        Confirmed against Microsoft's own Web API reference before writing
+        this: EntityKeyIndexStatus is a named enum - Pending, InProgress,
+        Active, Failed (see EntityKeyIndexStatus EnumType) - returned as one
+        of those strings, not a raw integer, so the string comparisons below
+        are exact, not a guess. New-DataverseAlternateKey previously only
+        tolerated the "not found yet" half of the async-creation race (the
+        try/catch on "already exists"); it never confirmed the key actually
+        finished building before returning control to the caller. A caller
+        that immediately upserts against a key still Pending/InProgress can
+        hit a transient failure that looks like a bug in this module rather
+        than the documented async index build Microsoft's own docs describe.
+
+        Does not block indefinitely - index build time scales with existing
+        row count, and an already-large table could legitimately take
+        longer than any reasonable script timeout, per Microsoft's own
+        guidance. A key still Pending/InProgress after -MaxWaitSeconds logs
+        a warning and returns rather than hanging forever; the create call
+        itself already succeeded, so this is a status warning, not a deploy
+        failure. Failed is treated differently - it is an actual problem
+        the platform is reporting, not a timing race, so it throws with the
+        system-job name Microsoft's docs say to look for.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $EntityLogicalName,
+        [Parameter(Mandatory)] [string] $KeySchemaName,
+        [int] $MaxWaitSeconds = 60,
+        [int] $PollIntervalSeconds = 3
+    )
+
+    $deadline = (Get-Date).AddSeconds($MaxWaitSeconds)
+    do {
+        $entity = Invoke-DataverseApi -Method Get `
+            -Path "EntityDefinitions(LogicalName='$EntityLogicalName')?`$expand=Keys(`$select=SchemaName,EntityKeyIndexStatus)" `
+            -SuppressNotFoundError
+        $key = $null
+        if ($entity) { $key = $entity.Keys | Where-Object { $_.SchemaName -eq $KeySchemaName } | Select-Object -First 1 }
+
+        if ($key -and $key.EntityKeyIndexStatus -eq 'Active') {
+            Write-Host "  active alternate key $EntityLogicalName.$KeySchemaName"
+            return
+        }
+        if ($key -and $key.EntityKeyIndexStatus -eq 'Failed') {
+            throw "Alternate key $EntityLogicalName.$KeySchemaName failed to build (EntityKeyIndexStatus: Failed). Look for the async system job named 'Create index for $DisplayName for table $EntityLogicalName' for the cause, fix it, then use the ReactivateEntityKey action - this module does not do that automatically."
+        }
+
+        if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds $PollIntervalSeconds }
+    } while ((Get-Date) -lt $deadline)
+
+    Write-Warning "Alternate key $EntityLogicalName.$KeySchemaName is still building after ${MaxWaitSeconds}s (not yet Active) - expected for a table with a lot of existing data, since index build time scales with row count. This is not a deploy failure; re-run later to confirm it reached Active."
+}
+
 function New-DataverseAlternateKey {
     <#
     .SYNOPSIS
         Idempotent alternate key creation, tolerant of the async-creation
-        race documented in the module header.
+        race documented in the module header, and polls to Active (or a
+        bounded timeout) before returning - see Wait-DataverseAlternateKeyActive.
     #>
     [CmdletBinding()]
     param(
@@ -613,11 +1260,13 @@ function New-DataverseAlternateKey {
         [Parameter(Mandatory)] [string] $DisplayName,
         [Parameter(Mandatory)] [string[]] $KeyAttributes,
         [Parameter(Mandatory)] [string] $SolutionUniqueName,
-        [int] $LanguageCode = 1033
+        [int] $LanguageCode = 1033,
+        [int] $MaxWaitSeconds = 60
     )
 
     if (Test-DataverseAlternateKey -EntityLogicalName $EntityLogicalName -KeySchemaName $KeySchemaName) {
         Write-Host "  skip   alternate key $EntityLogicalName.$KeySchemaName"
+        Wait-DataverseAlternateKeyActive -EntityLogicalName $EntityLogicalName -KeySchemaName $KeySchemaName -MaxWaitSeconds $MaxWaitSeconds
         return
     }
 
@@ -639,6 +1288,8 @@ function New-DataverseAlternateKey {
             throw
         }
     }
+
+    Wait-DataverseAlternateKeyActive -EntityLogicalName $EntityLogicalName -KeySchemaName $KeySchemaName -MaxWaitSeconds $MaxWaitSeconds
 }
 
 # --- Views ---------------------------------------------------------------------
@@ -722,6 +1373,38 @@ function New-LayoutXml {
 
 # --- Field security ---------------------------------------------------------------
 
+function Publish-DataverseEntity {
+    <#
+    .SYNOPSIS
+        Publishes customizations for one table via the Web API's PublishXml
+        action - required after an UPDATE to an already-existing solution
+        component, unlike every CREATE call elsewhere in this module.
+    .DESCRIPTION
+        Confirmed against Microsoft's own docs before writing this, not
+        assumed: "Solution components are published automatically when they
+        are created or deleted. You must publish changes when solution
+        components are updated." Every New-Dataverse*/Add-Dataverse*
+        function in this module only ever creates (POST) - Set-
+        DataverseFieldSecured is the sole exception, since marking an
+        existing column IsSecured is a PUT against something that already
+        existed and was already published. This is why nothing else in this
+        module has ever needed an explicit publish call, and also why that
+        absence wasn't a gap needing a fix everywhere - it only needed
+        closing at the one call site that actually updates something.
+
+        Scoped to the single entity that changed via PublishXml, not the
+        heavier PublishAllXml - Microsoft's own admin guidance is explicit
+        that publishing "can interfere with normal system operation," so
+        this module publishes only what it actually touched, not every
+        pending customization across the whole organization.
+    #>
+    param([Parameter(Mandatory)] [string] $EntityLogicalName)
+
+    $parameterXml = "<importexportxml><entities><entity>$EntityLogicalName</entity></entities></importexportxml>"
+    Invoke-DataverseApi -Method Post -Path 'PublishXml' -Body @{ ParameterXml = $parameterXml } | Out-Null
+    Write-Host "  publish $EntityLogicalName"
+}
+
 function Set-DataverseFieldSecured {
     <#
     .SYNOPSIS
@@ -743,6 +1426,11 @@ function Set-DataverseFieldSecured {
         the full typed attribute definition first, changing only IsSecured on
         it, and PUTting the whole thing back - the pattern Microsoft's own
         Web API sample uses for every attribute metadata update.
+
+        This PUT is also this module's one and only UPDATE to an existing
+        solution component (everything else only creates) - see
+        Publish-DataverseEntity for why that specifically requires an
+        explicit publish call afterward, which this function now makes.
     #>
     [CmdletBinding()]
     param(
@@ -763,6 +1451,7 @@ function Set-DataverseFieldSecured {
     $current.IsSecured = $true
     Invoke-DataverseApi -Method Put -Path $path -Body $current -SolutionUniqueName $SolutionUniqueName | Out-Null
     Write-Host "  create secured $EntityLogicalName.$AttributeLogicalName"
+    Publish-DataverseEntity -EntityLogicalName $EntityLogicalName
 }
 
 function New-DataverseFieldSecurityProfile {
@@ -915,6 +1604,126 @@ function New-DataverseSecurityRole {
 
     Invoke-DataverseApi -Method Post -Path "roles($roleId)/Microsoft.Dynamics.CRM.AddPrivilegesRole" -Body @{ Privileges = $rolePrivileges } | Out-Null
     Write-Host "  create security role $Name ($($rolePrivileges.Count) privileges)"
+}
+
+# --- What-if / dry run ------------------------------------------------------------
+
+function Show-DataverseWhatIfPlan {
+    <#
+    .SYNOPSIS
+        Prints a create/skip preview for every item in a schema spec against
+        the currently connected environment, without creating, updating, or
+        deleting anything.
+    .DESCRIPTION
+        Deliberately calls only Test-Dataverse*/read (GET) paths - never any
+        New-Dataverse*/Add-Dataverse* function - so a -WhatIf run cannot
+        mutate anything even if a flag check elsewhere in this module were
+        ever wrong. A structurally separate, read-only path is a stronger
+        guarantee than threading -WhatIf through every creating function and
+        trusting each one to correctly no-op: several of those functions
+        return an id a later step depends on (New-DataverseSecurityRole's
+        roleId, New-DataverseFieldSecurityProfile's fieldsecurityprofileid) -
+        skipping the create but not the later dependent lookup would hit a
+        genuine null-reference failure under this module's own
+        Set-StrictMode, on exactly the common case of a first-ever deploy of
+        a brand new schema where nothing exists yet to fall back to.
+
+        Because of that same dependency, security-role and field-security
+        items are reported by existence only (does the role/profile itself
+        already exist), not diffed at the privilege/permission level - doing
+        that correctly would mean resolving privilege IDs from tables that
+        may not exist yet either in a first-time -WhatIf run. Said plainly
+        in the output rather than pretended away, the same convention this
+        module already uses for rollup columns and custom forms.
+    #>
+    param([Parameter(Mandatory)] $Spec)
+
+    Write-Host "== What if: global choices =="
+    foreach ($choice in $Spec.globalChoices) {
+        if (Test-DataverseGlobalChoice -Name $choice.name) { Write-Host "  skip   global choice $($choice.name)" }
+        else { Write-Host "  create global choice $($choice.name) ($($choice.options.Count) options)" }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: tables =="
+    foreach ($table in $Spec.tables) {
+        if (Test-DataverseTable -LogicalName $table.logicalName) { Write-Host "  skip   table $($table.logicalName)" }
+        else { Write-Host "  create table $($table.logicalName)" }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: columns =="
+    foreach ($table in $Spec.tables) {
+        foreach ($column in $table.columns) {
+            $attributeLogicalName = $column.schemaName.ToLowerInvariant()
+            if (Test-DataverseColumn -EntityLogicalName $table.logicalName -AttributeLogicalName $attributeLogicalName) {
+                Write-Host "  skip   $($table.logicalName).$attributeLogicalName"
+            }
+            else {
+                Write-Host "  create $($table.logicalName).$attributeLogicalName"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: relationships =="
+    foreach ($table in $Spec.tables) {
+        foreach ($lookup in $table.lookups) {
+            if (Test-DataverseRelationship -SchemaName $lookup.relationshipSchemaName) {
+                Write-Host "  skip   relationship $($lookup.relationshipSchemaName)"
+            }
+            else {
+                Write-Host "  create relationship $($lookup.relationshipSchemaName) ($($table.logicalName).$($lookup.lookupSchemaName.ToLowerInvariant()) -> $($lookup.referencedEntity))"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: alternate keys =="
+    foreach ($table in $Spec.tables) {
+        foreach ($key in $table.alternateKeys) {
+            if (Test-DataverseAlternateKey -EntityLogicalName $table.logicalName -KeySchemaName $key.schemaName) {
+                Write-Host "  skip   alternate key $($table.logicalName).$($key.schemaName)"
+            }
+            else {
+                Write-Host "  create alternate key $($table.logicalName).$($key.schemaName) ($($key.keyAttributes -join ', '))"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: views =="
+    foreach ($view in $Spec.views) {
+        $table = $Spec.tables | Where-Object { $_.logicalName -eq $view.entityLogicalName } | Select-Object -First 1
+        $pluralDisplayName = if ($table) { $table.pluralDisplayName } else { $view.entityLogicalName }
+
+        if (Test-DataverseAutoGeneratedViewCollision -PluralDisplayName $pluralDisplayName -ProposedName $view.name) {
+            Write-Warning "'$($view.name)' matches a Dataverse auto-generated default view name for $($view.entityLogicalName) - would warn and create nothing."
+            continue
+        }
+
+        $existing = Invoke-DataverseApi -Method Get `
+            -Path "savedqueries?`$filter=returnedtypecode eq '$($view.entityLogicalName)' and name eq '$($view.name)'&`$select=savedqueryid" `
+            -SuppressNotFoundError
+        if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   view $($view.entityLogicalName).$($view.name)" }
+        else { Write-Host "  create view $($view.entityLogicalName).$($view.name)" }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: security roles =="
+    foreach ($role in $Spec.securityRoles) {
+        $existing = Invoke-DataverseApi -Method Get -Path "roles?`$filter=name eq '$($role.name)'&`$select=roleid" -SuppressNotFoundError
+        if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   security role $($role.name)" }
+        else { Write-Host "  create security role $($role.name) (existence only - privilege-level diffing not previewed)" }
+    }
+
+    Write-Host ""
+    Write-Host "== What if: field security =="
+    foreach ($profile in $Spec.fieldSecurityProfiles) {
+        $existing = Invoke-DataverseApi -Method Get -Path "fieldsecurityprofiles?`$filter=name eq '$($profile.name)'&`$select=fieldsecurityprofileid" -SuppressNotFoundError
+        if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   field security profile $($profile.name) (permission-level diffing not previewed)" }
+        else { Write-Host "  create field security profile $($profile.name) (permission-level diffing not previewed)" }
+    }
 }
 
 Export-ModuleMember -Function *

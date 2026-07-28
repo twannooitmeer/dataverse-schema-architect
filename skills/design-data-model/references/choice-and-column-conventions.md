@@ -2,11 +2,13 @@
 
 These are not stylistic preferences — each one traces back to a real problem hit building the reference implementation this plugin generalizes from.
 
-## Global choices only, explicit sequential values
+## Global choices by default, local picklists only when specifically requested
 
-Every Choice (option set) column is backed by a **global** choice set — never a local picklist. A local picklist can't be reused across tables, and more importantly, it can't be inspected or reasoned about consistently across a growing schema the way a named global choice can.
+**Always propose a global choice set for a Choice column** — never suggest a local picklist unprompted. A global choice can be reused across tables and can be inspected and reasoned about consistently across a growing schema; a local picklist can't be reused, full stop, and only ever exists because someone deliberately wanted this one column's options scoped to this one table.
 
-**Every option's value is explicit**, starting from a fixed base such as `100000000` and incrementing sequentially. Never let the value default to the publisher's auto-derived prefix (Dataverse computes one from a hash of the publisher name, which looks like `100000000`-ish but isn't guaranteed identical across environments or across a publisher rename). A schema redeployed to a second environment — a second `TT-TEST`, a client's own environment, anywhere — must produce the *same* option values, and only explicit values guarantee that.
+**If the human explicitly asks for a local picklist on a specific column** — "make that a local option set," "I don't want this one reusable" — go with it rather than talking them out of it; it's their call to make once they've said so. Still apply the rest of this convention exactly as if it were a global choice: explicit sequential values, never the publisher's auto-derived prefix (see below), and still flag the cross-environment portability risk in the moment, since a local picklist gets none of a global choice's reuse benefit and the caller should be choosing that trade-off knowingly, not by default.
+
+**Every option's value is explicit**, starting from a fixed base such as `100000000` and incrementing sequentially — for both global choices and any requested local picklist. Never let the value default to the publisher's auto-derived prefix (Dataverse computes one from a hash of the publisher name, which looks like `100000000`-ish but isn't guaranteed identical across environments or across a publisher rename). A schema redeployed to a second environment — a second `TT-TEST`, a client's own environment, anywhere — must produce the *same* option values, and only explicit values guarantee that.
 
 **If a choice's values are ever consumed by code that isn't Dataverse metadata itself** — a plugin, a Custom API, a Power Automate flow comparing a raw integer — treat those values as a contract. Confirm the exact values against whatever already-written code references them, rather than assuming a value scheme. A silent mismatch there produces wrong behavior with nothing to catch it at compile or run time.
 
@@ -38,8 +40,8 @@ Name custom views to describe what they actually filter on (e.g. "Achieved & Exp
 | Precise decimal | Decimal | Set `Precision` explicitly |
 | Currency amount | Money | |
 | Calendar date | DateTime, `DateOnly` behavior | See above — never `UserLocal` for these |
-| Yes/No flag | Boolean (Two Options) | Not a Choice column — Two Options is a distinct type in Dataverse's own terminology, and this plugin's mandatory-global-choice rule applies to Choice columns specifically |
-| Single-select category | Choice, backed by a global choice set | See above |
+| Yes/No flag | Boolean (Two Options) | Not a Choice column — Two Options is a distinct type in Dataverse's own terminology, and this plugin's global-choice-by-default rule applies to Choice columns specifically |
+| Single-select category | Choice, backed by a global choice set by default (local only if specifically requested) | See above |
 | Image | Image | |
 | Attachment | File | Set `MaxSizeInKb` deliberately |
 | Reference to another row | Lookup (1:N relationship) | See the cascade-behavior guidance in the main SKILL.md — named presets only |
@@ -48,5 +50,5 @@ Name custom views to describe what they actually filter on (e.g. "Achieved & Exp
 
 Propose an alternate key wherever there's a natural business-unique identifier (an external system's code, a combination that shouldn't legitimately repeat). Two things worth stating explicitly when proposing one:
 
-- **Alternate key creation is asynchronous** server-side — Dataverse builds a unique index in the background. A deploy script that checks "does this key exist" immediately after creating a batch of them can get a false "not found" for a key that was already successfully queued moments earlier. The deploy skill's `New-DataverseAlternateKey` already handles this; just be aware the key isn't necessarily *usable* the instant the create call returns.
+- **Alternate key creation is asynchronous** server-side — Dataverse builds a unique index in the background. A deploy script that checks "does this key exist" immediately after creating a batch of them can get a false "not found" for a key that was already successfully queued moments earlier. The deploy skill's `New-DataverseAlternateKey` already handles this, and also polls the key to `Active` (or a bounded timeout, for a table with enough existing data that the index build genuinely takes a while) before returning — so a caller downstream of the deploy doesn't need to separately account for the key not being usable yet.
 - Don't propose a key on a column where legitimate re-use of the same value combination is expected (e.g. someone re-certifying in a later year with the same exam code — the key should include the date to keep that combination unique, not exclude the date and block legitimate re-certification).

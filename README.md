@@ -6,10 +6,19 @@ A Claude Code plugin that designs and deploys Dataverse tables, global choices, 
 
 Built by generalizing a real Power Platform project's Dataverse schema work into something reusable. Along the way, several non-obvious pitfalls surfaced — a cascade-configuration near-miss that made a relationship "almost Parental" and blocked the next lookup outright, alternate keys that build asynchronously and can produce a false "not found" on a quick re-run, view names that silently collide with Dataverse's own auto-generated defaults, field permissions that fail unless the target column is explicitly marked secured first. This plugin makes those lessons the default behavior, not something the next person has to rediscover.
 
-Checked against [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) for structure and quality bar before building. Two gaps found in their own reference along the way, which this plugin fixes rather than imitates:
+Checked against [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) for structure and quality bar before building. This plugin differs deliberately in two ways:
 
-- Their table-management reference documents **local picklists only** — this plugin never creates one; every Choice column is a global choice with explicit, sequential option values.
-- Their reference **doesn't explicitly address solution targeting** — this plugin requires it as a mandatory parameter on every single create call, so a component can never silently land in whatever solution happens to be the environment's default.
+- Every Choice column **defaults to a global choice** with explicit, sequential option values instead of a publisher's auto-derived prefix — a local picklist is only ever created when specifically requested for that column.
+- **Solution targeting is a mandatory parameter** on every single create call, so a component can never silently land in whatever solution happens to be the environment's default.
+
+## Installation
+
+```
+/plugin marketplace add twannooitmeer/dataverse-schema-architect
+/plugin install dataverse-schema-architect@dataverse-schema-architect
+```
+
+Restart Claude Code (or reload plugins) afterward. This installs the three skills below (`design-data-model`, `deploy-dataverse-schema`, `report-issue`) and the two enforcement hooks.
 
 ## What's included
 
@@ -22,7 +31,7 @@ Checked against [microsoft/power-platform-skills](https://github.com/microsoft/p
 
 ## How it works
 
-No .NET SDK, no NuGet restore. Every Dataverse call is `Invoke-RestMethod` against the Web API, authenticated via `az account get-access-token` — this reuses an existing Azure CLI login with no extra sign-in step. A device-code fallback covers the case where Azure CLI isn't installed or logged in.
+No .NET SDK, no NuGet restore. Every Dataverse call is `Invoke-RestMethod` against the Web API. Authentication tries, in order: PAC CLI's own token cache (best-effort, unsupported — reads its local MSAL cache directly since `pac` has no command to export a token, DPAPI-decrypted the same way `pac` itself would read it), a client secret (for unattended/CI use), `az account get-access-token` (reuses an existing Azure CLI login), then device code as the last resort — and device-code sign-in is itself cached and silently refreshed on later runs, so it only prompts for a fresh interactive sign-in once.
 
 ```
 design-data-model  →  writes dataverse-schema.json  →  human reviews & approves
@@ -35,8 +44,9 @@ See [`skills/deploy-dataverse-schema/references/spec-format.md`](skills/deploy-d
 ## Prerequisites
 
 - PowerShell 7+ (`pwsh`)
-- Azure CLI (`az`), logged in via `az login` — or accept the device-code fallback prompt
+- One of: an existing PAC CLI sign-in (best-effort, unsupported — see below); Azure CLI (`az`) logged in via `az login`; a client secret for unattended/CI use (`DATAVERSE_TENANT_ID`/`DATAVERSE_CLIENT_ID`/`DATAVERSE_CLIENT_SECRET`); or accept the interactive device-code fallback prompt (cached and silently refreshed after the first sign-in). See `Get-DataverseToken` in [`Dataverse.psm1`](skills/deploy-dataverse-schema/scripts/Dataverse.psm1) for the exact priority order.
 - A Dataverse environment where you hold System Administrator or System Customizer
+- Optional: PAC CLI (`pac`) logged in via `pac auth create --url <environment-url>` — lets you skip passing `-EnvironmentUrl` explicitly at deploy time, and (best-effort, unsupported) may also let this module reuse its cached sign-in directly, skipping Azure CLI/device-code entirely.
 
 ## Getting started
 
@@ -49,6 +59,8 @@ Review the proposed model and the generated spec file, then:
 ```
 "Deploy the schema from dataverse-schema.json to <your environment URL>"
 ```
+
+`-EnvironmentUrl` can be omitted if PAC CLI already knows the target environment. If you've configured an environment allowlist (`-AllowedEnvironmentUrls` or `DATAVERSE_ALLOWED_ENVIRONMENTS`), a target outside it is refused unless you pass `-Force` — see [`safety-rules.md`](skills/deploy-dataverse-schema/references/safety-rules.md). Add `-WhatIf` to preview what would be created or skipped against the live environment, without creating, updating, or deleting anything.
 
 ## Not yet supported
 

@@ -11,7 +11,7 @@ Read-only against Dataverse. This skill never creates, modifies, or deletes anyt
 
 ### 1. Resolve the environment and verify access
 
-Ask for the Dataverse environment URL if not already known. Verify read access by calling `GET {url}/api/data/v9.2/EntityDefinitions?$top=1` (via `az account get-access-token` or the device-code fallback in `../deploy-dataverse-schema/scripts/Dataverse.psm1` — this skill only ever calls `Connect-Dataverse` and read (`GET`) paths from that module, never anything that creates or modifies).
+Ask for the Dataverse environment URL if not already known. Verify read access by calling `GET {url}/api/data/v9.2/EntityDefinitions?$top=1` (via `Connect-Dataverse`/`Get-DataverseToken` in `../deploy-dataverse-schema/scripts/Dataverse.psm1`, which resolves a token via PAC CLI's cache, client secret, Azure CLI, or a device-code sign-in that's cached and reused after the first time — this skill only ever calls `Connect-Dataverse` and read (`GET`) paths from that module, never anything that creates or modifies).
 
 Also resolve and record the **publisher** already in use in this environment (unique name, prefix, display name) via `GET .../publishers`. Every schema name proposed later uses this exact prefix — never invent one, and flag it clearly if more than one custom publisher exists, since that's the kind of ambiguity that caused real casing/naming mistakes in the project this plugin was generalized from (a `TT_DEV` vs `TT_Dev` mismatch cost real time to find and fix).
 
@@ -41,7 +41,7 @@ Arrange every table marked Create or Extend into tiers: Tier 0 has no dependenci
 
 For every column proposed, see `references/choice-and-column-conventions.md` before finalizing type choices. The two rules that matter most and are easy to skip past:
 
-- **Every Choice column is backed by a global choice, with explicit sequential option values starting from a fixed base (e.g. 100000000). Never a local picklist, never left to the publisher's auto-derived value prefix** — the latter produces unpredictable numbers that differ across environments the same schema is deployed to.
+- **Always propose a global choice for a Choice column, with explicit sequential option values starting from a fixed base (e.g. 100000000) — never left to the publisher's auto-derived value prefix**, which produces unpredictable numbers that differ across environments the same schema is deployed to. Only use a local picklist when the human specifically asks for one on that column; even then, keep the values explicit and sequential, and say plainly that it won't be reusable the way a global choice would be.
 - **Every date that represents a calendar fact rather than a moment in time (an achievement date, an expiry date, a target date) uses Date Only / Time Zone Independent behavior.** User-local date/time behavior produces off-by-one-day errors that only surface when someone is in a different time zone — the worst kind of bug to diagnose later, because it's silent until it isn't.
 
 ### 7. Propose relationships with named cascade behavior only
