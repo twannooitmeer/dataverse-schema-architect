@@ -38,6 +38,7 @@ Per the safety rule already established for `Set-DataverseFieldSecured` (see `sa
 - **Custom tab/section layout.** Every field lands in the template's first (and normally only) section, in the order given. No control over tabs, multiple sections, or column count.
 - **Reordering or removing existing fields.** This module only ever adds; it never repositions or deletes a control already on the form.
 - **Image and File fields**, for the reason above.
+- **Subgrid controls** (e.g. a child collection like Proposal Lines shown on its parent Proposal's form). This needs materially different code, not just another classid in the table above — a subgrid control doesn't bind via `datafieldname`; it needs a `<parameters>` block naming the relationship and a target view id, and the child table may not even have a dedicated view yet to point it at (using it only via a subgrid, with no standalone view, is a normal and common shape). A real `Add-DataverseFormSubgrid`-style function, with its own relationship/view resolution, would be a well-scoped follow-up — flagged, not built, as of the version that added scalar-field support (confirmed the classid itself is already known — `{E7A81278-8635-4d9e-8D4D-59480B391C5B}`, same source as the table above — the control shape is the actual gap).
 
 ## Spec format
 

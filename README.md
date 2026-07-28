@@ -70,6 +70,7 @@ Review the proposed model and the generated spec file, then:
 
 - Rollup columns (need a FetchXML aggregate definition — different mechanism than the rest of column creation)
 - Quick Create, Quick View, and Card forms, and custom tab/section layout on the Main form (a table's `mainForm.fields` adds columns/lookups to its existing auto-generated Main form only — see [`form-support.md`](skills/deploy-dataverse-schema/references/form-support.md))
+- Subgrid form controls (a child collection shown on its parent's form) — needs relationship/view resolution the current scalar-field-only form support doesn't do; see `form-support.md`
 - Security role / field security profile membership (creating the role or profile is supported; assigning users or teams to it is a separate, deliberate step)
 
 ## License
