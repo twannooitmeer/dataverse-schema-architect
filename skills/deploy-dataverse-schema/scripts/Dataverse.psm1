@@ -682,7 +682,20 @@ function Invoke-DataverseApi {
         return Invoke-RestMethod @params
     }
     catch {
-        $status = $_.Exception.Response.StatusCode.value__
+        # $_.Exception.Response only exists on an HTTP-status-level failure
+        # (a real 4xx/5xx from Dataverse). A connection-level failure - DNS
+        # resolution, connection refused, TLS, timeout - throws a different
+        # exception type (typically HttpRequestException) with no Response
+        # property at all, and under this module's strict mode, dot-access
+        # to a genuinely absent property throws "cannot be found on this
+        # object" instead of returning $null - masking the real, actually
+        # useful underlying error (e.g. "could not resolve host") behind a
+        # confusing unrelated one. Index into PSObject.Properties instead,
+        # same pattern as the nextLink handling above, so $status stays
+        # $null for a connection-level failure and falls through to the
+        # bare `throw` below, which re-raises the original exception intact.
+        $responseProp = $_.Exception.PSObject.Properties['Response']
+        $status = if ($responseProp -and $responseProp.Value) { $responseProp.Value.StatusCode.value__ } else { $null }
         if ($status -eq 404 -and $SuppressNotFoundError) {
             return $null
         }
@@ -1724,6 +1737,139 @@ function Show-DataverseWhatIfPlan {
         if (-not (Test-DataverseNotFound $existing)) { Write-Host "  skip   field security profile $($profile.name) (permission-level diffing not previewed)" }
         else { Write-Host "  create field security profile $($profile.name) (permission-level diffing not previewed)" }
     }
+}
+
+# --- Solution structure -----------------------------------------------------
+# Supports skills/validate-solution-structure. Read-only against `solutions`
+# and `solutioncomponents` - nothing in this section ever creates, updates,
+# or moves a component. Reassigning a component's owning solution isn't even
+# always possible without recreating it (different publishers can't share a
+# component), so this reports drift for a human to act on, the same way
+# Microsoft's own FastTrack Solution Component Validation Tool does - see
+# skills/validate-solution-structure/references/checks.md for the full
+# reasoning and citation.
+
+$script:SolutionComponentTypeNames = @{
+    # Sourced from Microsoft's own solutioncomponent table/entity reference
+    # (componenttype's global choice values). NOT exhaustive - Power
+    # Platform has added component types since this reference was written
+    # (Canvas Apps, Custom APIs, Connection References, Environment
+    # Variables, Connectors and others aren't in Microsoft's own published
+    # list) - Get-DataverseSolutionComponentTypeName falls back to the raw
+    # numeric code rather than guessing a name for anything not in this
+    # table, matching this project's own rule of never assuming a value
+    # scheme it hasn't confirmed.
+    1 = 'Entity'; 2 = 'Attribute'; 3 = 'Relationship'; 4 = 'Attribute Picklist Value'
+    5 = 'Attribute Lookup Value'; 6 = 'View Attribute'; 7 = 'Localized Label'
+    8 = 'Relationship Extra Condition'; 9 = 'Option Set'; 10 = 'Entity Relationship'
+    11 = 'Entity Relationship Role'; 12 = 'Entity Relationship Relationships'
+    13 = 'Managed Property'; 14 = 'Entity Key'; 16 = 'Privilege'
+    17 = 'PrivilegeObjectTypeCode'; 18 = 'Index'; 20 = 'Role'; 21 = 'Role Privilege'
+    22 = 'Display String'; 23 = 'Display String Map'; 24 = 'Form'; 25 = 'Organization'
+    26 = 'Saved Query'; 29 = 'Workflow'; 31 = 'Report'; 32 = 'Report Entity'
+    33 = 'Report Category'; 34 = 'Report Visibility'; 35 = 'Attachment'
+    36 = 'Email Template'; 37 = 'Contract Template'; 38 = 'KB Article Template'
+    39 = 'Mail Merge Template'; 44 = 'Duplicate Rule'; 45 = 'Duplicate Rule Condition'
+    46 = 'Entity Map'; 47 = 'Attribute Map'; 48 = 'Ribbon Command'
+    49 = 'Ribbon Context Group'; 50 = 'Ribbon Customization'; 52 = 'Ribbon Rule'
+    53 = 'Ribbon Tab To Command Map'; 55 = 'Ribbon Diff'; 59 = 'Saved Query Visualization'
+    60 = 'System Form'; 61 = 'Web Resource'; 62 = 'Site Map'; 63 = 'Connection Role'
+    64 = 'Complex Control'; 65 = 'Hierarchy Rule'; 66 = 'Custom Control (PCF)'
+    68 = 'Custom Control Default Config'; 70 = 'Field Security Profile'
+    71 = 'Field Permission'; 90 = 'Plugin Type'; 91 = 'Plugin Assembly'
+    92 = 'SDK Message Processing Step'; 93 = 'SDK Message Processing Step Image'
+    95 = 'Service Endpoint'; 150 = 'Routing Rule'; 151 = 'Routing Rule Item'
+    152 = 'SLA'; 153 = 'SLA Item'; 154 = 'Convert Rule'; 155 = 'Convert Rule Item'
+    161 = 'Mobile Offline Profile'; 162 = 'Mobile Offline Profile Item'
+    165 = 'Similarity Rule'
+}
+
+function Get-DataverseSolutionComponentTypeName {
+    <#
+    .SYNOPSIS
+        Human-readable name for a solutioncomponent `componenttype` code, or
+        the raw code itself (never a guess) if it isn't in this module's
+        reference table.
+    #>
+    param([Parameter(Mandatory)] [int] $ComponentType)
+
+    if ($script:SolutionComponentTypeNames.ContainsKey($ComponentType)) {
+        return $script:SolutionComponentTypeNames[$ComponentType]
+    }
+    return "Component Type $ComponentType (unmapped - see Microsoft's solutioncomponent reference)"
+}
+
+function Get-DataverseSolutionByUniqueName {
+    <#
+    .SYNOPSIS
+        Resolves a solution's id, display name, version, and publisher
+        (unique name + customization prefix) from its unique name. Returns
+        $null (not a throw) if no solution with that unique name exists -
+        an expected, reportable case for this skill, not an error.
+    #>
+    param([Parameter(Mandatory)] [string] $UniqueName)
+
+    $result = Invoke-DataverseApi -Method Get -Path (
+        "solutions?`$filter=uniquename eq '$UniqueName'" +
+        "&`$select=solutionid,friendlyname,uniquename,version,ismanaged" +
+        "&`$expand=publisherid(`$select=uniquename,customizationprefix,friendlyname)"
+    ) -SuppressNotFoundError
+
+    if (Test-DataverseNotFound $result) { return $null }
+    return $result.value[0]
+}
+
+function Get-DataverseSolutionComponents {
+    <#
+    .SYNOPSIS
+        Every solutioncomponent row (componenttype, objectid) for one
+        solution, following `@odata.nextLink` until the full set is
+        retrieved - a real solution can hold far more components than a
+        single Web API page returns.
+    .DESCRIPTION
+        `@odata.nextLink` comes back as a full URL rooted at this module's
+        own ApiUrl. Rather than issue a second, separately-built
+        Invoke-RestMethod call for continuation pages, this strips that
+        known prefix and keeps routing every page through
+        Invoke-DataverseApi - the same "every call goes through this one
+        function" discipline the rest of this module and both skills'
+        SKILL.md files already enforce.
+    #>
+    param([Parameter(Mandatory)] [guid] $SolutionId)
+
+    $components = [System.Collections.Generic.List[pscustomobject]]::new()
+    $path = "solutioncomponents?`$filter=_solutionid_value eq $SolutionId&`$select=componenttype,objectid"
+
+    while ($path) {
+        $response = Invoke-DataverseApi -Method Get -Path $path
+        foreach ($c in $response.value) { $components.Add($c) }
+
+        $path = $null
+        # Strict mode (on in this module) throws on dot-access to a property
+        # that genuinely isn't there - and the Web API omits @odata.nextLink
+        # entirely on the last page, not just sets it empty. Index into
+        # PSObject.Properties instead, which returns $null for "absent"
+        # rather than throwing - the same class of bug already hit once in
+        # this project's history reading an external JSON spec under strict
+        # mode (see Deploy-DataverseSchema.ps1's own remark on why it
+        # disables strict mode for that reason); a live API response is the
+        # same kind of "partially-optional external shape" this function
+        # needs to tolerate, even though the rest of this module keeps
+        # strict mode on for its own code.
+        $nextLinkProp = $response.psobject.Properties['@odata.nextLink']
+        $nextLink = if ($nextLinkProp) { $nextLinkProp.Value } else { $null }
+        if ($nextLink) {
+            $prefix = "$($script:DataverseContext.ApiUrl)/"
+            if ($nextLink.StartsWith($prefix)) {
+                $path = $nextLink.Substring($prefix.Length)
+            }
+            else {
+                Write-Warning "solutioncomponents @odata.nextLink didn't match the expected ApiUrl prefix - stopping pagination early for solution $SolutionId. Results below may be incomplete."
+            }
+        }
+    }
+
+    return $components
 }
 
 Export-ModuleMember -Function *

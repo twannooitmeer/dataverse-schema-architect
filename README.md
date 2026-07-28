@@ -18,7 +18,7 @@ Checked against [microsoft/power-platform-skills](https://github.com/microsoft/p
 /plugin install dataverse-schema-architect@dataverse-schema-architect
 ```
 
-Restart Claude Code (or reload plugins) afterward. This installs the three skills below (`design-data-model`, `deploy-dataverse-schema`, `report-issue`) and the two enforcement hooks.
+Restart Claude Code (or reload plugins) afterward. This installs the four skills below (`design-data-model`, `deploy-dataverse-schema`, `validate-solution-structure`, `report-issue`) and the two enforcement hooks.
 
 ## What's included
 
@@ -26,6 +26,7 @@ Restart Claude Code (or reload plugins) afterward. This installs the three skill
 |---|---|
 | `skills/design-data-model` | Conversational, read-only design: discovers existing tables, scores each proposed entity Reuse/Extend/Create with collision detection, orders tables by dependency, produces a Mermaid ER diagram, writes an approved spec file. Never creates anything. |
 | `skills/deploy-dataverse-schema` | Idempotently creates everything in the approved spec, via a PowerShell module hitting the Dataverse Web API directly. Safe to re-run — every step is create-if-missing. |
+| `skills/validate-solution-structure` | Read-only check of a declared horizontal-segmentation topology against live `solutioncomponent` placement — component-type drift, cross-layer duplicate ownership, publisher consistency. Borrows its core check from Microsoft's own FastTrack Solution Component Validation Tool; reports drift, never moves or reassigns anything. |
 | `skills/report-issue` | Files a bug report against this repo's own GitHub issues. |
 | `hooks/` | Two `PostToolUse` guardrails that scan newly-written PowerShell for the two costliest mistakes this plugin exists to prevent: missing solution targeting, and hand-built cascade configuration objects. |
 
@@ -40,6 +41,8 @@ design-data-model  →  writes dataverse-schema.json  →  human reviews & appro
 ```
 
 See [`skills/deploy-dataverse-schema/references/spec-format.md`](skills/deploy-dataverse-schema/references/spec-format.md) for the exact spec file shape, and [`skills/deploy-dataverse-schema/references/safety-rules.md`](skills/deploy-dataverse-schema/references/safety-rules.md) for why each safety rule exists — every one traces back to something that actually broke, not a hypothetical.
+
+`validate-solution-structure` runs independently of this pipeline — an on-demand health check against a declared solution-layout file (see [`skills/validate-solution-structure/references/solution-layout-format.md`](skills/validate-solution-structure/references/solution-layout-format.md)), not a required step before or after a deploy.
 
 ## Prerequisites
 
