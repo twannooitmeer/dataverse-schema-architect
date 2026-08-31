@@ -6,10 +6,19 @@ A Claude Code plugin that designs and deploys Dataverse tables, global choices, 
 
 Built by generalizing a real Power Platform project's Dataverse schema work into something reusable. Along the way, several non-obvious pitfalls surfaced — a cascade-configuration near-miss that made a relationship "almost Parental" and blocked the next lookup outright, alternate keys that build asynchronously and can produce a false "not found" on a quick re-run, view names that silently collide with Dataverse's own auto-generated defaults, field permissions that fail unless the target column is explicitly marked secured first. This plugin makes those lessons the default behavior, not something the next person has to rediscover.
 
-Checked against [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) for structure and quality bar before building. This plugin differs deliberately in two ways:
+Checked against [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — re-checked at commit `d1c1e71` (Aug 2026). Microsoft's eight plugins are each organized around an **app surface** (Power Pages, model-driven, canvas, code, mobile, MCP, Power Automate); Dataverse schema work appears only as a sub-step of building one of them. There is no standalone Dataverse plugin, which is the gap this one fills. Where the two do overlap on schema creation, Microsoft's `model-apps` builder is ahead — it already covers rollups, quick-create/quick-view forms, explicit form layout, subgrids, and role membership assignment.
 
-- Every Choice column **defaults to a global choice** with explicit, sequential option values instead of a publisher's auto-derived prefix — a local picklist is only ever created when specifically requested for that column.
-- **Solution targeting is a mandatory parameter** on every single create call, so a component can never silently land in whatever solution happens to be the environment's default.
+What this plugin has that no skill in that repository does:
+
+- **Column-level (field) security** — `fieldSecurityProfiles` and `secured: true` columns. Microsoft lists column-level security as an unimplemented follow-up.
+- **Solution-structure governance** — `validate-solution-structure` and `scaffold-solution-structure` check and scaffold a horizontal-segmentation topology. Microsoft's solution skills are Power Pages site packaging only; nothing there validates layering, cross-layer duplicate ownership, or publisher consistency.
+- **An auth chain that works unattended** — PAC CLI cache → client secret → Azure CLI → cached device code. Every Dataverse path in Microsoft's repo is `az account get-access-token` and nothing else, so it has no CI story.
+- **Deployment guardrails** — an environment allowlist and `-WhatIf` preview, neither of which has an equivalent there.
+- **PowerShell, no Node toolchain** — one module over the Web API, versus a vendored bundled SDK.
+
+Two conventions this plugin holds that Microsoft's skills now share rather than contradict: mandatory solution targeting on every create call (`mobile-apps/add-dataverse` enforces the same rule via the same `MSCRM.SolutionUniqueName` header), and explicit sequential option values on global choices. This plugin still defaults *every* Choice column to a global choice, where Microsoft's is per-column opt-in — a preference difference, not a capability gap.
+
+Full comparison, with citations: [`docs/microsoft-power-platform-skills-overlap.md`](docs/microsoft-power-platform-skills-overlap.md).
 
 ## Installation
 
