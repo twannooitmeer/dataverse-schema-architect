@@ -76,6 +76,8 @@ Their `personas[]` model — jobs-to-be-done → declared privileges → unioned
 
 ## 6. Open items
 
-- Decide between the two roads in §5: delegate schema creation to Microsoft's engine, or formally own the "schema without an app" niche. This is the one decision the rest of the roadmap depends on.
+> [!decision] Resolved 2026-09-02
+> Locked in the niche road: this plugin stops pursuing schema-creation parity with `model-apps`. Reasoning given at decision time — Microsoft moves faster on app-surface schema creation than this repo can keep pace with, so the durable value is the narrower, defensible ground (§4), not a race to match a faster-moving team on their own turf. `deploy-dataverse-schema` will not grow rollups, quick-create/quick-view/card forms, custom tab/section layout, subgrids, or role/profile membership assignment — see README's "Out of scope by design" section, which replaces the old "Not yet supported" framing now that these are a deliberate boundary, not a backlog.
+
 - Re-run this comparison when Microsoft ships column-level security — it is their stated follow-up and would remove differentiator #1.
-- Evaluate adopting `check-version.js` and a CI skill lint, which are cheap and independent of that decision.
+- Evaluate adopting `check-version.js` and a CI skill lint, which are cheap and independent of the resolved decision above.

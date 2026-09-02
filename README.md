@@ -75,12 +75,16 @@ Review the proposed model and the generated spec file, then:
 
 `-EnvironmentUrl` can be omitted if PAC CLI already knows the target environment. If you've configured an environment allowlist (`-AllowedEnvironmentUrls` or `DATAVERSE_ALLOWED_ENVIRONMENTS`), a target outside it is refused unless you pass `-Force` — see [`safety-rules.md`](skills/deploy-dataverse-schema/references/safety-rules.md). Add `-WhatIf` to preview what would be created or skipped against the live environment, without creating, updating, or deleting anything.
 
-## Not yet supported
+## Out of scope by design
+
+Microsoft's `model-apps` builder already covers everything below. As of 2026-09-02 this plugin has deliberately stopped chasing schema-creation parity with it — Microsoft moves faster on app-surface schema work than this repo can keep pace with, so effort goes toward the narrower ground nothing upstream covers (field security, solution-structure governance, unattended auth, deployment guardrails — see "Why this exists" above) instead of reimplementing their builder in PowerShell. Reasoning: [`docs/microsoft-power-platform-skills-overlap.md`](docs/microsoft-power-platform-skills-overlap.md) §5–6.
 
 - Rollup columns (need a FetchXML aggregate definition — different mechanism than the rest of column creation)
 - Quick Create, Quick View, and Card forms, and custom tab/section layout on the Main form (a table's `mainForm.fields` adds columns/lookups to its existing auto-generated Main form only — see [`form-support.md`](skills/deploy-dataverse-schema/references/form-support.md))
 - Subgrid form controls (a child collection shown on its parent's form) — needs relationship/view resolution the current scalar-field-only form support doesn't do; see `form-support.md`
-- Security role / field security profile membership (creating the role or profile is supported; assigning users or teams to it is a separate, deliberate step)
+- Security role / field security profile *membership assignment* (creating the role or profile, and this plugin's own column-level field security, are both fully supported and stay in scope — assigning users or teams to a role is the piece being left to Microsoft's `personas[].assignTo`)
+
+If you need any of these, use Microsoft's `model-apps` builder for that part of the schema, or a fork of this plugin — see the overlap doc for why this repo isn't forking `power-platform-skills` itself.
 
 ## License
 
