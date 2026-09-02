@@ -1,5 +1,5 @@
 {
-  "_comment": "PostToolUse checks on Write/Edit/MultiEdit, scanning newly-written PowerShell content for the two costliest mistakes hit building the reference implementation this plugin generalizes from: components created without explicit solution targeting, and hand-built cascade configuration objects that can silently become parental-equivalent. Neither hook can (or needs to) guard calls that already go through Dataverse.psm1's own functions, which enforce both rules at the PowerShell language level (mandatory parameters, ValidateSet) - these hooks catch new code that bypasses those safe wrappers.",
+  "_comment": "PostToolUse checks on Write/Edit/MultiEdit, scanning newly-written PowerShell content for the two costliest mistakes hit building the reference implementation this plugin generalizes from: components created without explicit solution targeting, and hand-built cascade configuration objects that can silently become parental-equivalent. Neither hook can (or needs to) guard calls that already go through Dataverse.psm1's own functions, which enforce both rules at the PowerShell language level (mandatory parameters, ValidateSet) - these hooks catch new code that bypasses those safe wrappers. SessionStart runs a plugin-version-drift check once per session, borrowed from microsoft/power-platform-skills' check-version.js pattern (see docs/microsoft-power-platform-skills-overlap.md) - the real incident it targets is dated 2026-07-28, when plugin.json's version sat unbumped for weeks and Claude Code's marketplace update never noticed new skills were available.",
   "hooks": {
     "PostToolUse": [
       {
@@ -13,6 +13,17 @@
           {
             "type": "command",
             "command": "node -e \"const path=require('node:path'); const root=process.env.PLUGIN_ROOT||process.env.CLAUDE_PLUGIN_ROOT; if(!root){console.error('PLUGIN_ROOT is not set'); process.exit(0);} require(path.resolve(root,'hooks','validate-cascade-config.js'));\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const path=require('node:path'); const root=process.env.PLUGIN_ROOT||process.env.CLAUDE_PLUGIN_ROOT; if(!root){process.exit(0);} require(path.resolve(root,'hooks','check-plugin-version.js'));\"",
             "timeout": 10
           }
         ]

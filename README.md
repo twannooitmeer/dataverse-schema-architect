@@ -27,7 +27,7 @@ Full comparison, with citations: [`docs/microsoft-power-platform-skills-overlap.
 /plugin install dataverse-schema-architect@dataverse-schema-architect
 ```
 
-Restart Claude Code (or reload plugins) afterward. This installs the five skills below (`design-data-model`, `deploy-dataverse-schema`, `validate-solution-structure`, `scaffold-solution-structure`, `report-issue`) and the two enforcement hooks.
+Restart Claude Code (or reload plugins) afterward. This installs the five skills below (`design-data-model`, `deploy-dataverse-schema`, `validate-solution-structure`, `scaffold-solution-structure`, `report-issue`), the two enforcement hooks, and a session-start plugin-version check.
 
 ## What's included
 
@@ -38,7 +38,7 @@ Restart Claude Code (or reload plugins) afterward. This installs the five skills
 | `skills/validate-solution-structure` | Read-only check of a declared horizontal-segmentation topology against live `solutioncomponent` placement — component-type drift, cross-layer duplicate ownership, publisher consistency. Borrows its core check from Microsoft's own FastTrack Solution Component Validation Tool; reports drift, never moves or reassigns anything. |
 | `skills/scaffold-solution-structure` | Ensures a topology's publisher/solutions exist live (creating them if missing) and pulls each one down locally via `pac solution clone` — for a brand-new environment, or retroactively for one that already has real components but no local repo yet. The only skill in this plugin with a hard PAC CLI dependency. |
 | `skills/report-issue` | Files a bug report against this repo's own GitHub issues. |
-| `hooks/` | Two `PostToolUse` guardrails that scan newly-written PowerShell for the two costliest mistakes this plugin exists to prevent: missing solution targeting, and hand-built cascade configuration objects. |
+| `hooks/` | Two `PostToolUse` guardrails that scan newly-written PowerShell for the two costliest mistakes this plugin exists to prevent: missing solution targeting, and hand-built cascade configuration objects. A third, `SessionStart`, warns once per session if the installed copy is behind `origin/main` — borrowed from Microsoft's `check-version.js` pattern; see [`docs/microsoft-power-platform-skills-overlap.md`](docs/microsoft-power-platform-skills-overlap.md). |
 
 ## How it works
 
