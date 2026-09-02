@@ -79,5 +79,10 @@ Their `personas[]` model — jobs-to-be-done → declared privileges → unioned
 > [!decision] Resolved 2026-09-02
 > Locked in the niche road: this plugin stops pursuing schema-creation parity with `model-apps`. Reasoning given at decision time — Microsoft moves faster on app-surface schema creation than this repo can keep pace with, so the durable value is the narrower, defensible ground (§4), not a race to match a faster-moving team on their own turf. `deploy-dataverse-schema` will not grow rollups, quick-create/quick-view/card forms, custom tab/section layout, subgrids, or role/profile membership assignment — see README's "Out of scope by design" section, which replaces the old "Not yet supported" framing now that these are a deliberate boundary, not a backlog.
 
-- Re-run this comparison when Microsoft ships column-level security — it is their stated follow-up and would remove differentiator #1.
-- Evaluate adopting `check-version.js` and a CI skill lint, which are cheap and independent of the resolved decision above.
+- Re-run this comparison when Microsoft ships column-level security — it is their stated follow-up and would remove differentiator #1. **No automated trigger for this** (deliberately, per Twan 2026-09-02) — checked manually, on no fixed schedule.
+
+> [!decision] Resolved 2026-09-02
+> `check-version.js` adopted, CI skill lint evaluated and deferred:
+> - **Plugin-version drift check** ported as a `SessionStart` hook (`hooks/check-plugin-version.js`) rather than a per-SKILL.md instruction line — this repo's own stated principle is enforcement belongs in hooks, not in something the model has to remember to run. Fires once per session, silent on any error, never blocks.
+> - **CI added**: a `version-bump` check (`.github/workflows/ci.yml`) fails a PR that touches `skills/`, `hooks/`, or a `.psm1`/`.ps1` without bumping `.claude-plugin/plugin.json`'s version — directly targets the 2026-07-28 incident where the version sat unbumped for weeks and Claude Code's marketplace update never noticed.
+> - **A PSScriptAnalyzer lint job was evaluated and *not* added.** Run cold against this repo it reports 123 warnings, overwhelmingly `PSAvoidUsingWriteHost` — a rule this project already knowingly violates on purpose. Gating CI on a ruleset the project doesn't hold itself to would contradict its own "a rule must name its incident" standard. Left as a separate future decision (pick a ruleset that fits, or clean up and suppress) rather than bundled in here.

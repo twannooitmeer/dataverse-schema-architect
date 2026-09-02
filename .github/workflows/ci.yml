@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  version-bump:
+    name: plugin-version-bumped
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: fail if skills/hooks/module changed without a plugin.json version bump
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- 'skills/**' 'hooks/**' '**/*.psm1' '**/*.ps1')
+          if [ -z "$CHANGED" ]; then
+            echo "No skill/hook/module files changed; nothing to check."
+            exit 0
+          fi
+          BASE_VERSION=$(git show "$BASE_SHA:.claude-plugin/plugin.json" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
+          HEAD_VERSION=$(node -pe 'JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version')
+          echo "Changed files:"
+          echo "$CHANGED"
+          echo "Base version: $BASE_VERSION, head version: $HEAD_VERSION"
+          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
+            echo "::error::skills/, hooks/, or a PowerShell module changed but .claude-plugin/plugin.json's version was not bumped. Claude Code's marketplace update decides whether an install is stale by comparing this exact string, not the git SHA (see the 2026-07-28 incident in the plugin's wiki project note) — an unbumped version means installed copies silently never learn this change exists."
+            exit 1
+          fi
+
+# A PSScriptAnalyzer lint job was evaluated (borrowed from
+# microsoft/power-platform-skills' CI, see docs/microsoft-power-platform-skills-overlap.md
+# §5-6) and deliberately not added yet: run cold against this repo, its default
+# ruleset reports 123 warnings, the large majority PSAvoidUsingWriteHost — a rule
+# this project already knowingly violates on purpose (Write-Host is the intended
+# way these scripts talk to a human running them interactively, not a mistake).
+# Gating CI on a ruleset the project doesn't actually hold itself to would make
+# CI red from day one over nothing real, which is the opposite of this repo's own
+# "a rule must name its incident" standard. Adopting it needs a prior pass to pick
+# a ruleset that fits this project's actual conventions (or fix what's real and
+# suppress the rest) — a separate piece of work, not bundled into this version-bump
+# check.
