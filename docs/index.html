@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dataverse Schema Architect</title>
+<meta name="description" content="A Claude Code plugin that designs and deploys Dataverse schema — tables, columns, relationships, views, and security roles — with safety defaults a real deployment surfaced the hard way.">
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --bg-raised: #ffffff;
+    --border: #e4e0d9;
+    --text: #26241f;
+    --text-dim: #6b675e;
+    --accent: #8a4b2e;
+    --accent-soft: #f3e6dd;
+    --code-bg: #f1efe9;
+    --pill-bg: #efeae1;
+    --shadow: 0 1px 2px rgba(30, 25, 15, 0.04), 0 8px 24px rgba(30, 25, 15, 0.05);
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16140f;
+      --bg-raised: #1e1c16;
+      --border: #332f26;
+      --text: #eeeae1;
+      --text-dim: #a29c8d;
+      --accent: #e0955f;
+      --accent-soft: #33261c;
+      --code-bg: #221f18;
+      --pill-bg: #2a271e;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+  }
+  code {
+    background: var(--code-bg);
+    padding: 0.12em 0.4em;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 1rem 1.1rem;
+    border-radius: 10px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; }
+
+  .wrap { max-width: 780px; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+
+  header.hero { margin-bottom: 3rem; }
+  .kicker {
+    display: inline-block;
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 0.3em 0.7em;
+    border-radius: 999px;
+    margin-bottom: 1.1rem;
+    font-weight: 600;
+  }
+  h1 {
+    font-size: 2.3rem;
+    line-height: 1.15;
+    margin: 0 0 0.6rem;
+    letter-spacing: -0.01em;
+  }
+  .tagline {
+    font-size: 1.15rem;
+    color: var(--text-dim);
+    margin: 0 0 1.6rem;
+    max-width: 60ch;
+  }
+  .cta-row { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.55em 1.1em;
+    border-radius: 8px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    color: var(--text);
+  }
+  .btn:hover { text-decoration: none; border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: #fff8f2; border-color: var(--accent); }
+  .btn.primary:hover { opacity: 0.92; }
+
+  section { margin-bottom: 3.2rem; }
+  h2 {
+    font-size: 1.5rem;
+    margin: 0 0 1rem;
+    letter-spacing: -0.005em;
+  }
+  h3 { font-size: 1.05rem; margin: 0 0 0.35rem; }
+  p { margin: 0 0 1rem; }
+  .lede { color: var(--text-dim); }
+
+  .pill-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.2rem; }
+  .pill {
+    font-size: 0.8rem;
+    background: var(--pill-bg);
+    color: var(--text-dim);
+    padding: 0.3em 0.75em;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+  }
+
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.1rem 1.2rem;
+    box-shadow: var(--shadow);
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    margin-bottom: 2rem;
+  }
+  .flow .step { color: var(--text); }
+  .flow .arrow { color: var(--text-dim); }
+  .flow .human {
+    color: var(--accent);
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 0.82rem;
+  }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.9rem;
+  }
+  .card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.2rem 1.3rem;
+    box-shadow: var(--shadow);
+  }
+  .card h3 { display: flex; align-items: baseline; gap: 0.5em; flex-wrap: wrap; }
+  .card h3 code { font-size: 0.78em; }
+  .card p { margin: 0; color: var(--text-dim); font-size: 0.95rem; }
+  .card .triggers {
+    margin-top: 0.6rem;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+  }
+  .card .triggers em { font-style: normal; color: var(--text); }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+  @media (min-width: 640px) {
+    .two-col { grid-template-columns: 1fr 1fr; }
+  }
+  .box {
+    border-radius: 12px;
+    padding: 1.2rem 1.3rem;
+    border: 1px solid var(--border);
+  }
+  .box.yes { background: var(--accent-soft); }
+  .box.no { background: var(--bg-raised); }
+  .box h3 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.7rem; }
+  .box.yes h3 { color: var(--accent); }
+  .box.no h3 { color: var(--text-dim); }
+  .box ul { margin: 0; padding-left: 1.15em; }
+  .box li { margin-bottom: 0.5em; font-size: 0.92rem; }
+  .box li:last-child { margin-bottom: 0; }
+
+  .guardrails { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.8rem; }
+  .guardrails li {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    font-size: 0.92rem;
+  }
+  .guardrails strong { display: block; margin-bottom: 0.2rem; }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 1.6rem;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+  footer a { color: var(--text-dim); text-decoration: underline; text-decoration-color: var(--border); }
+  footer p { margin: 0 0 0.4rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="kicker">Claude Code plugin · MIT</span>
+    <h1>Dataverse Schema Architect</h1>
+    <p class="tagline">Designs and deploys Dataverse schema — tables, columns, relationships, views, and security roles — with the safety defaults a real production deployment surfaced the hard way, not just documented advice.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/twannooitmeer/dataverse-schema-architect">View on GitHub →</a>
+      <a class="btn" href="#install">Install</a>
+      <a class="btn" href="https://github.com/twannooitmeer/dataverse-schema-architect/blob/main/docs/microsoft-power-platform-skills-overlap.md">Overlap analysis vs. Microsoft</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>How it works</h2>
+    <p class="lede">Two skills, one human checkpoint in between. Design never touches a live environment; deploy never runs without an approved file to point at.</p>
+    <div class="flow">
+      <span class="step"><code>design-data-model</code></span>
+      <span class="arrow">→</span>
+      <span class="step">writes <code>dataverse-schema.json</code></span>
+      <span class="arrow">→</span>
+      <span class="human">human reviews &amp; approves</span>
+      <span class="arrow">→</span>
+      <span class="step"><code>deploy-dataverse-schema</code></span>
+      <span class="arrow">→</span>
+      <span class="step">live Dataverse environment</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>What's included</h2>
+    <div class="card-grid">
+
+      <div class="card">
+        <h3>design-data-model <code>read-only</code></h3>
+        <p>Conversational schema design. Discovers existing tables first, scores each proposed entity <strong>Reuse / Extend / Create</strong> with collision detection, orders tables by dependency, produces a Mermaid ER diagram, and writes an approved spec file. Never creates anything itself.</p>
+      </div>
+
+      <div class="card">
+        <h3>deploy-dataverse-schema</h3>
+        <p>Idempotently creates everything in the approved spec via a PowerShell module against the Dataverse Web API directly — no .NET SDK, no NuGet restore. Every step is create-if-missing, so a failed run is safe to just re-run after a fix.</p>
+      </div>
+
+      <div class="card">
+        <h3>validate-solution-structure <code>read-only</code></h3>
+        <p>Checks a declared horizontal-segmentation topology against live <code>solutioncomponent</code> placement: component-type drift, cross-layer duplicate ownership, publisher consistency. Reports drift, never moves or reassigns anything.</p>
+      </div>
+
+      <div class="card">
+        <h3>scaffold-solution-structure</h3>
+        <p>Ensures a topology's publishers and solutions exist live (creating them if this is a brand-new environment) and pulls each one down locally via <code>pac solution clone</code> — works the same whether the org is empty or already has real components with no local repo yet.</p>
+      </div>
+
+      <div class="card">
+        <h3>report-issue</h3>
+        <p>Files a bug report against this repo's own GitHub issues, matching the convention Microsoft's plugins use.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Safety, enforced not just documented</h2>
+    <p class="lede">The lessons below all came from something that actually broke while building the real project this plugin generalizes from. Two of them are enforced by hooks that scan any newly-written PowerShell, not left to a skill description to remember.</p>
+    <ul class="guardrails">
+      <li><strong>Mandatory solution targeting.</strong> Every create call requires an explicit solution — nothing can land in whatever solution happens to be the environment's default.</li>
+      <li><strong>Named cascade presets only.</strong> No hand-built cascade configuration objects — the class of bug that made a relationship "almost Parental" and silently blocked the next lookup.</li>
+      <li><strong>Global choices by default.</strong> Every Choice column defaults to a global choice with explicit sequential values; a local picklist is opt-in, never the silent default.</li>
+      <li><strong>Async-aware and idempotent.</strong> Alternate keys build asynchronously server-side and a too-fast re-check can report a false "not found" — the deploy path accounts for it. Every step is safe to re-run.</li>
+      <li><strong>View-name collision checking</strong> against Dataverse's own auto-generated defaults ("Active X", "My X"), not just a same-name lookup.</li>
+      <li><strong>Plugin-version drift check.</strong> A <code>SessionStart</code> hook warns if the installed copy is behind the source repo — added after an unbumped version silently hid new skills from Claude Code's own marketplace updater for weeks.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Scope: a deliberate niche, not a race for parity</h2>
+    <p class="lede">Benchmarked against <a href="https://github.com/microsoft/power-platform-skills">microsoft/power-platform-skills</a> — eight plugins built around app surfaces (Power Pages, model-driven apps, canvas apps, mobile, code apps), each treating Dataverse schema as a sub-step. There's no standalone Dataverse plugin there, which is the gap this one fills. Where the two genuinely overlap on raw schema creation, Microsoft's own <code>model-apps</code> builder is ahead — so this plugin has deliberately stopped trying to match it feature-for-feature and put the effort into what nothing upstream does at all.</p>
+    <div class="two-col">
+      <div class="box yes">
+        <h3>What this plugin owns</h3>
+        <ul>
+          <li>Column-level (field) security — <code>fieldSecurityProfiles</code> and <code>secured: true</code> columns</li>
+          <li>Solution-structure governance — horizontal-segmentation validation, cross-layer duplicate ownership, publisher consistency</li>
+          <li>An auth chain that works unattended — PAC CLI cache → client secret → Azure CLI → cached device code, so there's an actual CI story</li>
+          <li>Deployment guardrails — an environment allowlist and a <code>-WhatIf</code> preview</li>
+          <li>PowerShell only — no Node toolchain, no vendored SDK</li>
+        </ul>
+      </div>
+      <div class="box no">
+        <h3>Out of scope by design</h3>
+        <ul>
+          <li>Rollup columns</li>
+          <li>Quick Create / Quick View / Card forms, custom tab layout</li>
+          <li>Subgrid form controls</li>
+          <li>Security-role / field-security-profile <em>membership assignment</em> (creating the role itself stays in scope)</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:1rem; font-size:0.9rem; color:var(--text-dim);">Full reasoning, citations, and the fork-vs-standalone decision: <a href="https://github.com/twannooitmeer/dataverse-schema-architect/blob/main/docs/microsoft-power-platform-skills-overlap.md">docs/microsoft-power-platform-skills-overlap.md</a>.</p>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <pre><code>/plugin marketplace add twannooitmeer/dataverse-schema-architect
+/plugin install dataverse-schema-architect@dataverse-schema-architect</code></pre>
+    <p>Restart Claude Code (or reload plugins) afterward.</p>
+    <h3 style="margin-top:1.6rem;">Prerequisites</h3>
+    <div class="pill-row">
+      <span class="pill">PowerShell 7+</span>
+      <span class="pill">Dataverse System Administrator / Customizer</span>
+    </div>
+    <p class="lede">Authentication tries, in order: PAC CLI's own token cache (best-effort) → a client secret (unattended/CI) → <code>az account get-access-token</code> → interactive device code (cached and silently refreshed after the first sign-in).</p>
+    <h3 style="margin-top:1.6rem;">Getting started</h3>
+    <pre><code>"Design a data model for &lt;describe what you're building&gt;"
+
+# review the proposed model and the generated spec file, then:
+
+"Deploy the schema from dataverse-schema.json to &lt;your environment URL&gt;"</code></pre>
+  </section>
+
+  <footer>
+    <p>MIT licensed. Built by <a href="https://github.com/twannooitmeer">Twan Nooitmeer</a>, generalized from real Power Platform project work.</p>
+    <p><a href="https://github.com/twannooitmeer/dataverse-schema-architect">Repository</a> · <a href="https://github.com/twannooitmeer/dataverse-schema-architect/issues">Issues</a> · <a href="https://github.com/twannooitmeer/dataverse-schema-architect/blob/main/README.md">Full README</a></p>
+  </footer>
+
+</div>
+</body>
+</html>
