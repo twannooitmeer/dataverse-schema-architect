@@ -34,6 +34,55 @@ jobs:
             exit 1
           fi
 
+  evals:
+    name: skill-trigger-evals
+    runs-on: ubuntu-latest
+    # claude plugin eval is early access, gated per organization, and needs a
+    # real model credential to actually run a prompt against each skill's
+    # description. Forks and PRs from outside collaborators never have that
+    # secret, so the job is skipped rather than failing them - see evals/README.md.
+    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: install claude code cli
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: run skill-trigger evals
+        run: |
+          set -uo pipefail
+          output=$(claude plugin eval . --json eval-results.json --no-publish --threshold 1.0 2>&1)
+          status=$?
+          echo "$output"
+
+          if echo "$output" | grep -qi "early access"; then
+            echo "::notice::claude plugin eval is not enabled for this organization yet (early access gate). Skipping rather than failing - see evals/README.md."
+            exit 0
+          fi
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::One or more eval cases scored below the 1.0 threshold - a skill description likely triggers on a prompt it shouldn't, or fails to trigger on one it should. See eval-results.json and evals/README.md."
+          fi
+          exit "$status"
+
+      - name: upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: |
+            eval-results.json
+            evals/results/
+          if-no-files-found: ignore
+
 # A PSScriptAnalyzer lint job was evaluated (borrowed from
 # microsoft/power-platform-skills' CI, see docs/microsoft-power-platform-skills-overlap.md
 # §5-6) and deliberately not added yet: run cold against this repo, its default
