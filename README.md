@@ -86,6 +86,19 @@ Microsoft's `model-apps` builder already covers everything below. As of 2026-09-
 
 If you need any of these, use Microsoft's `model-apps` builder for that part of the schema, or a fork of this plugin — see the overlap doc for why this repo isn't forking `power-platform-skills` itself.
 
+## Evals
+
+[`evals/`](evals/) checks that each skill's `description` triggers on the
+prompts it should and stays quiet on the ones it shouldn't, via `claude
+plugin eval` (Claude Code's own eval harness): 50 cases across the five
+skills, five trigger prompts and five non-trigger prompts each, including
+near-miss cases like "design a data model" for a non-Dataverse database.
+Runs in CI on every PR when an `ANTHROPIC_API_KEY` secret is configured.
+See [`evals/README.md`](evals/README.md) for layout, coverage, and how to
+run it locally. `claude plugin eval` is early access and gated per
+organization, so CI skips this job rather than failing when it isn't
+available.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
