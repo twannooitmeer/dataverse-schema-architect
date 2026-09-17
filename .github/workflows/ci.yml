@@ -41,22 +41,31 @@ jobs:
     # real model credential to actually run a prompt against each skill's
     # description. Forks and PRs from outside collaborators never have that
     # secret, so the job is skipped rather than failing them - see evals/README.md.
-    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    # A job-level `if` cannot read the secrets context (GitHub rejects the whole
+    # workflow file), so the gate lives on each step via the job's env instead.
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
+      - name: skip when no model credential is available
+        if: ${{ env.ANTHROPIC_API_KEY == '' }}
+        run: echo "::notice::ANTHROPIC_API_KEY is not set for this run (fork or outside PR); skipping the evals job - see evals/README.md."
+
       - name: checkout
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
         uses: actions/checkout@v4
 
       - name: setup node
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: install claude code cli
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
         run: npm install -g @anthropic-ai/claude-code@latest
 
       - name: run skill-trigger evals
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
         run: |
           set -uo pipefail
           output=$(claude plugin eval . --json eval-results.json --no-publish --threshold 1.0 2>&1)
@@ -74,7 +83,7 @@ jobs:
           exit "$status"
 
       - name: upload eval report
-        if: always()
+        if: ${{ always() && env.ANTHROPIC_API_KEY != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: eval-results
