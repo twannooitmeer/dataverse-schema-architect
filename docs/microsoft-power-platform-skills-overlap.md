@@ -1,9 +1,9 @@
 # Overlap analysis: dataverse-schema-architect vs. microsoft/power-platform-skills
 
-**Assessed:** 31 August 2026
-**Upstream reviewed:** [`microsoft/power-platform-skills`](https://github.com/microsoft/power-platform-skills) at commit `d1c1e71` — 8 plugins, ~90 skills, 1,210 files
+**Assessed:** 31 August 2026, re-checked 17 September 2026
+**Upstream reviewed:** [`microsoft/power-platform-skills`](https://github.com/microsoft/power-platform-skills) at commit `b869e5f` (16 September 2026): 8 plugins, 113 skills, 1,315 files. Originally reviewed at `d1c1e71` (31 August 2026): 8 plugins, ~90 skills, 1,210 files.
 **Question asked:** where do the two libraries overlap, and could part of this plugin live as a fork of Microsoft's repository?
-**Verdict:** do not fork. Keep the standalone repository, narrow the positioning to three defensible areas, and stop pursuing schema-creation parity.
+**Verdict:** unchanged. Do not fork. Keep the standalone repository, narrow the positioning to three defensible areas, and stop pursuing schema-creation parity.
 
 ---
 
@@ -58,6 +58,40 @@ Their `personas[]` model — jobs-to-be-done → declared privileges → unioned
 5. **PowerShell, no Node toolchain.** One module over the Web API, versus a vendored bundled SDK and a Node dependency.
 6. **Schema as the product**, rather than as a step toward an app module and sitemap.
 
+## 4a. Re-check at `b869e5f` (17 September 2026)
+
+25 commits landed upstream between `d1c1e71` and `b869e5f`, touching 358 files (+55,926/-7,253 lines). None of it changes the verdict above.
+
+**No plugin added or removed.** Still the same eight: `power-pages`, `model-apps`, `canvas-apps`, `code-apps`, `mobile-apps`, `mcp-apps`, `power-automate`, `power-apps-mobile-extension`.
+
+**Three new skills:**
+
+- `mcp-apps/generate-codeful-mcp-tool`: codeful (JS) MCP tool generation, alongside the existing `generate-mcp-app-ui`.
+- `mobile-apps/setup-app-insights`: wires Application Insights telemetry into a mobile app.
+- `power-pages/migrate-webapi-selectall`: migrates a site off unbounded Web API `$select`-all calls to an explicit column allowlist.
+
+**Everything else is depth, not breadth**, concentrated in two plugins:
+
+- `mobile-apps` (≈20 `SKILL.md` files touched, plus `hooks/hooks.json`, `hooks/run-telemetry.js`, `hooks/validate-navigation-idempotency.js`, `hooks/validate-protected-paths.js`, three new `agents/*.md` revisions, and a new `scripts/lib/telemetry/` region-resolution subsystem): mostly telemetry, offline-profile, and native-capability hardening.
+- `model-apps` (`app-builder/SKILL.md`, `genpage/SKILL.md`, `telemetry/SKILL.md`, `report-issue/SKILL.md`, six `genpage-*` agents, a new `lint-app-spec.js`, and ~25 new test files under `scripts/tests/`): mostly App Spec linting and genpage agent refinement.
+- `power-pages` (`add-ai-webapi`, `audit-permissions`, `integrate-webapi`, `test-site` `SKILL.md` files, plus the new `migrate-webapi-selectall` skill and a new `references/webapi-field-allowlist.md`).
+- `canvas-apps/canvas-app` and `mcp-apps/generate-mcp-app-ui` each had their `SKILL.md` touched once.
+
+**The claims this doc already made were re-verified line-for-line, not just assumed to still hold:**
+
+- Solution targeting: `plugins/mobile-apps/skills/add-dataverse/SKILL.md` still carries the same `SolutionUniqueName`/`MSCRM.SolutionUniqueName` HARD rule (the file changed, 65 insertions and 27 deletions, but this rule did not).
+- Global choices: `plugins/model-apps/scripts/lib/entity-provision.js` still assigns `value: 100000000 + i`, unchanged.
+- Auth: still `az account get-access-token` only, no client-secret path anywhere upstream. Differentiator #3 stands.
+
+**Trip-wire checked directly, not inferred: column-level field security has *not* shipped.** All three places that said "tracked follow-up" at `d1c1e71` still say it verbatim at `b869e5f`:
+
+- `plugins/model-apps/references/app-spec-schema.md:1202`: *"Not yet supported (tracked follow-up): column-level (field) security and access teams / hierarchy [security]."*
+- `plugins/model-apps/references/app-spec-schema-advanced.md:359`: same sentence.
+- `plugins/model-apps/skills/app-builder/SKILL.md:611`: same sentence, referenced as **"column-level (field) security"** and **"access teams / hierarchy security"**.
+- `plugins/model-apps/references/authoring-flow.md:669` also newly (re-)states: *"Column-level security and access teams are not yet supported."*
+
+Differentiator #1 (§4) stands unchanged. No follow-up action triggered.
+
 ## 5. The fork question
 
 **Legally permitted, practically inadvisable.**
@@ -80,9 +114,10 @@ Their `personas[]` model — jobs-to-be-done → declared privileges → unioned
 > Locked in the niche road: this plugin stops pursuing schema-creation parity with `model-apps`. Reasoning given at decision time — Microsoft moves faster on app-surface schema creation than this repo can keep pace with, so the durable value is the narrower, defensible ground (§4), not a race to match a faster-moving team on their own turf. `deploy-dataverse-schema` will not grow rollups, quick-create/quick-view/card forms, custom tab/section layout, subgrids, or role/profile membership assignment — see README's "Out of scope by design" section, which replaces the old "Not yet supported" framing now that these are a deliberate boundary, not a backlog.
 
 - Re-run this comparison when Microsoft ships column-level security — it is their stated follow-up and would remove differentiator #1. **No automated trigger for this** (deliberately, per Twan 2026-09-02) — checked manually, on no fixed schedule.
+- **Re-checked 2026-09-17 against `b869e5f`** (see §4a): trip-wire not tripped, column-level field security still explicitly "not yet supported" upstream. All other claims re-verified. Next re-check remains unscheduled, on no fixed cadence, checked manually whenever Twan next looks.
 
 > [!decision] Resolved 2026-09-02
 > `check-version.js` adopted, CI skill lint evaluated and deferred:
 > - **Plugin-version drift check** ported as a `SessionStart` hook (`hooks/check-plugin-version.js`) rather than a per-SKILL.md instruction line — this repo's own stated principle is enforcement belongs in hooks, not in something the model has to remember to run. Fires once per session, silent on any error, never blocks.
 > - **CI added**: a `version-bump` check (`.github/workflows/ci.yml`) fails a PR that touches `skills/`, `hooks/`, or a `.psm1`/`.ps1` without bumping `.claude-plugin/plugin.json`'s version — directly targets the 2026-07-28 incident where the version sat unbumped for weeks and Claude Code's marketplace update never noticed.
-> - **A PSScriptAnalyzer lint job was evaluated and *not* added.** Run cold against this repo it reports 123 warnings, overwhelmingly `PSAvoidUsingWriteHost` — a rule this project already knowingly violates on purpose. Gating CI on a ruleset the project doesn't hold itself to would contradict its own "a rule must name its incident" standard. Left as a separate future decision (pick a ruleset that fits, or clean up and suppress) rather than bundled in here.
+> - **A PSScriptAnalyzer lint job was evaluated and *not* added.** Run cold against this repo it reports 123 warnings, overwhelmingly `PSAvoidUsingWriteHost`, a rule this project already knowingly violates on purpose. Gating CI on a ruleset the project doesn't hold itself to would contradict its own "a rule must name its incident" standard. Left as a separate future decision (pick a ruleset that fits, or clean up and suppress) rather than bundled in here. Re-run with a curated second ruleset and exact warning locations in [`docs/psscriptanalyzer-options.md`](psscriptanalyzer-options.md); still no decision made, just the numbers for whoever picks.
