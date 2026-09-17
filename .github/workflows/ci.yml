@@ -36,13 +36,6 @@ jobs:
 
 # A PSScriptAnalyzer lint job was evaluated (borrowed from
 # microsoft/power-platform-skills' CI, see docs/microsoft-power-platform-skills-overlap.md
-# §5-6) and deliberately not added yet: run cold against this repo, its default
-# ruleset reports 123 warnings, the large majority PSAvoidUsingWriteHost — a rule
-# this project already knowingly violates on purpose (Write-Host is the intended
-# way these scripts talk to a human running them interactively, not a mistake).
-# Gating CI on a ruleset the project doesn't actually hold itself to would make
-# CI red from day one over nothing real, which is the opposite of this repo's own
-# "a rule must name its incident" standard. Adopting it needs a prior pass to pick
-# a ruleset that fits this project's actual conventions (or fix what's real and
-# suppress the rest) — a separate piece of work, not bundled into this version-bump
-# check.
+# §5-6) and deliberately not added yet. Two rulesets, exact warning counts and
+# locations, and what each remaining warning is: docs/psscriptanalyzer-options.md.
+# No decision made yet on which ruleset (or neither) to adopt.
