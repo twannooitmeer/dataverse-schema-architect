@@ -36,9 +36,9 @@ Name custom views to describe what they actually filter on (e.g. "Achieved & Exp
 |---|---|---|
 | Short text | String | Set `maxLength` deliberately, not to whatever the deploy skill defaults to (100) |
 | Long text | Memo | The deploy skill defaults `maxLength` to 2000 if left unset, but treat that as a fallback, not a real answer — a `Memo` column meant to hold actual prose (a disclaimer, a description) should almost always get an explicit `maxLength` sized to what the content genuinely needs |
-| Whole number | Integer | Set explicit Min/Max where the domain has real bounds |
-| Precise decimal | Decimal | Set `Precision` explicitly |
-| Currency amount | Money | |
+| Whole number | Integer | Set explicit `minValue`/`maxValue` where the domain has real bounds; left out, the column takes the full Int32 range |
+| Precise decimal | Decimal | Set `Precision` explicitly; `minValue`/`maxValue` default to the full range (negatives allowed) |
+| Currency amount | Money | `minValue`/`maxValue` default to the full range (negatives allowed) |
 | Calendar date | DateTime, `DateOnly` behavior | See above — never `UserLocal` for these |
 | Yes/No flag | Boolean (Two Options) | Not a Choice column — Two Options is a distinct type in Dataverse's own terminology, and this plugin's global-choice-by-default rule applies to Choice columns specifically |
 | Single-select category | Choice, backed by a global choice set by default (local only if specifically requested) | See above |

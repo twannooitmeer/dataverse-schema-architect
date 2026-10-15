@@ -99,6 +99,13 @@ run it locally. `claude plugin eval` is early access and gated per
 organization, so CI skips this job rather than failing when it isn't
 available.
 
+## Tests
+
+[`tests/`](tests/) holds Pester 5 tests over `Dataverse.psm1` with the Web
+API mocked out, asserting on the request body a call would have sent; no
+Dataverse environment is touched. They run in CI on every PR
+(`module-tests`). Locally, in PowerShell 7: `Invoke-Pester ./tests`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
