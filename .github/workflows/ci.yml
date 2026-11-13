@@ -19,7 +19,8 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- 'skills/**' 'hooks/**' '**/*.psm1' '**/*.ps1')
+          # tests/ is excluded: a test-only change ships nothing to an install.
+          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- 'skills/**' 'hooks/**' '**/*.psm1' '**/*.ps1' ':!tests/**')
           if [ -z "$CHANGED" ]; then
             echo "No skill/hook/module files changed; nothing to check."
             exit 0
@@ -33,6 +34,28 @@ jobs:
             echo "::error::skills/, hooks/, or a PowerShell module changed but .claude-plugin/plugin.json's version was not bumped. Claude Code's marketplace update decides whether an install is stale by comparing this exact string, not the git SHA (see the 2026-07-28 incident in the plugin's wiki project note) — an unbumped version means installed copies silently never learn this change exists."
             exit 1
           fi
+
+  module-tests:
+    name: module-tests
+    runs-on: ubuntu-latest
+    # Pester tests over Dataverse.psm1 with the Web API mocked out; no
+    # credential or environment needed, so unlike evals this runs on every PR.
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: run Pester tests
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.0' })) {
+            Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser
+          }
+          Import-Module Pester -MinimumVersion 5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
 
   evals:
     name: skill-trigger-evals

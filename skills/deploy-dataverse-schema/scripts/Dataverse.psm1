@@ -1176,6 +1176,28 @@ function Add-DataverseColumn {
         disclaimer/description text that Dataverse's own UI would have
         defaulted to 2000 characters, truncated to 100 instead. Pass this
         explicitly to override either default.
+    .PARAMETER MinValue
+        Only meaningful with -Type Integer, Decimal or Money. Sent only when
+        the caller actually passes it (checked via $PSBoundParameters, never
+        by comparing against 0): an unset [int] or [decimal] parameter is 0
+        in PowerShell, so "always send it" quietly meant "MinValue 0 and
+        MaxValue 0" for every Integer column a spec left unbounded - a column
+        that then refuses every value but 0. Hit for real on 2026-10-15
+        in a client deployment ("requires the property to be less than or equal to 0
+        but is 1" on the first write). Left unset, the effective range is
+        type-aware, the same idea as -MaxLength:
+          Integer - omitted from the request; Dataverse's own default is the
+                    full Int32 range (-2147483648 to 2147483647).
+          Decimal - sent explicitly as the full supported range
+                    (-100000000000 to 100000000000), the maker portal's
+                    default. Not omitted: Microsoft documents the API-side
+                    default for an omitted bound as MinValue 0 and MaxValue
+                    1000000000, which would silently refuse negative values.
+          Money   - same reasoning, full supported range
+                    (-922337203685477 to 922337203685477).
+        Integer bounds must be whole numbers within the Int32 range.
+    .PARAMETER MaxValue
+        See -MinValue.
     #>
     [CmdletBinding()]
     param(
@@ -1187,8 +1209,8 @@ function Add-DataverseColumn {
         [int] $MaxLength,
         [ValidateSet('Text', 'Email', 'Url', 'TextArea')] [string] $StringFormat = 'Text',
         [string] $AutoNumberFormat,
-        [int] $MinValue,
-        [int] $MaxValue,
+        [decimal] $MinValue,  # [decimal], not [int]: Decimal/Money bounds can be fractional or exceed Int32
+        [decimal] $MaxValue,
         [int] $Precision = 2,
         [int] $MaxSizeInKb = 10240,
         [string] $TrueLabel = 'Yes',
@@ -1214,6 +1236,34 @@ function Add-DataverseColumn {
     # shared default across String and Memo is wrong.
     $effectiveMaxLength = if ($MaxLength -gt 0) { $MaxLength } elseif ($Type -eq 'Memo') { 2000 } else { 100 }
 
+    # Numeric bounds - see the -MinValue parameter help. Only what the caller
+    # passed counts; an unset parameter's 0 never reaches the request body.
+    $hasMinValue = $PSBoundParameters.ContainsKey('MinValue')
+    $hasMaxValue = $PSBoundParameters.ContainsKey('MaxValue')
+    if (($hasMinValue -or $hasMaxValue) -and $Type -notin 'Integer', 'Decimal', 'Money') {
+        throw "Add-DataverseColumn: -MinValue/-MaxValue only apply to Integer, Decimal and Money columns (got '$Type' for $SchemaName)."
+    }
+    if ($hasMinValue -and $hasMaxValue -and $MinValue -gt $MaxValue) {
+        throw "Add-DataverseColumn: -MinValue ($MinValue) is greater than -MaxValue ($MaxValue) for $SchemaName."
+    }
+    $supportedRange = @{
+        Integer = @([decimal][int]::MinValue, [decimal][int]::MaxValue)
+        Decimal = @([decimal]-100000000000, [decimal]100000000000)
+        Money   = @([decimal]-922337203685477, [decimal]922337203685477)
+    }
+    if ($supportedRange.ContainsKey($Type)) {
+        $low, $high = $supportedRange[$Type]
+        foreach ($bound in @(@{ Name = 'MinValue'; Set = $hasMinValue; Value = $MinValue }, @{ Name = 'MaxValue'; Set = $hasMaxValue; Value = $MaxValue })) {
+            if (-not $bound.Set) { continue }
+            if ($bound.Value -lt $low -or $bound.Value -gt $high) {
+                throw "Add-DataverseColumn: -$($bound.Name) $($bound.Value) is outside the supported $Type range ($low to $high) for $SchemaName."
+            }
+            if ($Type -eq 'Integer' -and $bound.Value -ne [decimal]::Truncate($bound.Value)) {
+                throw "Add-DataverseColumn: -$($bound.Name) $($bound.Value) is not a whole number, which an Integer column requires ($SchemaName)."
+            }
+        }
+    }
+
     $body = switch ($Type) {
         'String' {
             $stringBody = @{ '@odata.type' = 'Microsoft.Dynamics.CRM.StringAttributeMetadata'; SchemaName = $SchemaName
@@ -1235,16 +1285,27 @@ function Add-DataverseColumn {
                DisplayName = $displayLabel; MaxLength = $effectiveMaxLength }
         }
         'Integer' {
-            @{ '@odata.type' = 'Microsoft.Dynamics.CRM.IntegerAttributeMetadata'; SchemaName = $SchemaName
-               DisplayName = $displayLabel; MinValue = $MinValue; MaxValue = $MaxValue; Format = 'None' }
+            $integerBody = @{ '@odata.type' = 'Microsoft.Dynamics.CRM.IntegerAttributeMetadata'; SchemaName = $SchemaName
+               DisplayName = $displayLabel; Format = 'None' }
+            # Omitted bound = Dataverse's own default, the full Int32 range.
+            if ($hasMinValue) { $integerBody.MinValue = [int]$MinValue }
+            if ($hasMaxValue) { $integerBody.MaxValue = [int]$MaxValue }
+            $integerBody
         }
         'Decimal' {
+            # Always explicit: an omitted bound would get the API's documented
+            # default (MinValue 0, MaxValue 1000000000), not the full range.
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.DecimalAttributeMetadata'; SchemaName = $SchemaName
-               DisplayName = $displayLabel; Precision = $Precision }
+               DisplayName = $displayLabel; Precision = $Precision
+               MinValue = if ($hasMinValue) { $MinValue } else { $supportedRange.Decimal[0] }
+               MaxValue = if ($hasMaxValue) { $MaxValue } else { $supportedRange.Decimal[1] } }
         }
         'Money' {
+            # Same reasoning as Decimal.
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.MoneyAttributeMetadata'; SchemaName = $SchemaName
-               DisplayName = $displayLabel }
+               DisplayName = $displayLabel
+               MinValue = if ($hasMinValue) { $MinValue } else { $supportedRange.Money[0] }
+               MaxValue = if ($hasMaxValue) { $MaxValue } else { $supportedRange.Money[1] } }
         }
         'DateOnly' {
             @{ '@odata.type' = 'Microsoft.Dynamics.CRM.DateTimeAttributeMetadata'; SchemaName = $SchemaName
